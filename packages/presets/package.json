@@ -1,0 +1,21 @@
+{
+  "name": "@vis/presets",
+  "version": "0.1.0",
+  "description": "Curated preset scenes for rapid prototyping.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@vis/core": "^0.1.0",
+    "@vis/renderer-pixi": "^0.1.0",
+    "@vis/timeline": "^0.1.0"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5"
+  }
+}
