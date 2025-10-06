@@ -1,0 +1,23 @@
+{
+  "name": "@vis/core",
+  "version": "0.1.0",
+  "description": "Deterministic scene graph, loop controller, and plugin host for VIS engine.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "eventemitter3": "^5.0.1",
+    "seedrandom": "^3.0.5",
+    "simplex-noise": "^4.0.1"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5"
+  }
+}

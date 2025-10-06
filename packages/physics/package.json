@@ -1,0 +1,22 @@
+{
+  "name": "@vis/physics",
+  "version": "0.1.0",
+  "description": "Matter.js adapter for VIS scenes.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "matter-js": "^0.19.0"
+  },
+  "peerDependencies": {
+    "@vis/core": "^0.1.0"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5"
+  }
+}

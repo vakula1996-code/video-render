@@ -1,0 +1,24 @@
+{
+  "name": "@vis/audio",
+  "version": "0.1.0",
+  "description": "Audio analysis and transport layer combining Tone.js and Meyda.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "eventemitter3": "^5.0.1",
+    "meyda": "^5.6.3",
+    "tone": "^14.8.49"
+  },
+  "peerDependencies": {
+    "@vis/core": "^0.1.0"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5"
+  }
+}
