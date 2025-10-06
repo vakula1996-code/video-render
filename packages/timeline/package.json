@@ -1,0 +1,22 @@
+{
+  "name": "@vis/timeline",
+  "version": "0.1.0",
+  "description": "GSAP timeline bridge synchronized to VIS audio events.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "gsap": "^3.12.5"
+  },
+  "peerDependencies": {
+    "@vis/core": "^0.1.0"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5"
+  }
+}
