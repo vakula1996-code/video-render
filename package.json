@@ -1,0 +1,25 @@
+{
+  "name": "video-render",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Monorepo foundation for a modular 2D visualization engine with real-time and offline rendering.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "npm run dev --workspace @vis/demo",
+    "build": "npm run build --workspaces",
+    "render": "tsx packages/export/src/cli/render.ts",
+    "export": "tsx packages/export/src/cli/export-video.ts",
+    "analyze": "tsx packages/audio/src/cli/analyze.ts"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "tsup": "^8.0.2",
+    "tsx": "^4.7.1",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.10"
+  }
+}

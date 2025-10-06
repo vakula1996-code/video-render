@@ -1,0 +1,24 @@
+{
+  "name": "@vis/renderer-pixi",
+  "version": "0.1.0",
+  "description": "PixiJS based WebGL2 renderer with post-processing chain.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@pixi/filter-blur": "^7.4.0",
+    "@pixi/filter-color-matrix": "^7.4.0",
+    "pixi.js": "^7.4.0"
+  },
+  "peerDependencies": {
+    "@vis/core": "^0.1.0"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.7"
+  }
+}

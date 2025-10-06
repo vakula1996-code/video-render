@@ -1,0 +1,25 @@
+{
+  "name": "@vis/export",
+  "version": "0.1.0",
+  "description": "Deterministic offline renderer via Puppeteer and ffmpeg.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "fs-extra": "^11.2.0",
+    "puppeteer": "^22.8.0"
+  },
+  "peerDependencies": {
+    "@vis/core": "^0.1.0"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.7"
+  }
+}
