@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "eventemitter3": "^5.0.1",
-    "meyda": "^5.6.6",
+    "meyda": "^5.6.5",
     "tone": "^14.8.52"
   },
   "peerDependencies": {
