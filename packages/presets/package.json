@@ -11,9 +11,9 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "@vis/core": "workspace:*",
-    "@vis/renderer-pixi": "workspace:*",
-    "@vis/timeline": "workspace:*"
+    "@vis/core": "^0.1.0",
+    "@vis/renderer-pixi": "^0.1.0",
+    "@vis/timeline": "^0.1.0"
   },
   "devDependencies": {
     "rimraf": "^5.0.7"

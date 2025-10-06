@@ -9,10 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@vis/audio": "workspace:*",
-    "@vis/core": "workspace:*",
-    "@vis/presets": "workspace:*",
-    "@vis/renderer-pixi": "workspace:*",
-    "@vis/timeline": "workspace:*"
+    "@vis/audio": "^0.1.0",
+    "@vis/core": "^0.1.0",
+    "@vis/presets": "^0.1.0",
+    "@vis/renderer-pixi": "^0.1.0",
+    "@vis/timeline": "^0.1.0"
   }
 }
