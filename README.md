@@ -31,3 +31,26 @@ npm run analyze  # Offline Meyda FFT analysis helper
 - Puppeteer is configured with GPU flags for headless WebGL2 support.
 
 Add new plugins by implementing the `VisPlugin` interface in `@vis/core` and registering it on the `VisEngine` instance.
+
+## Step-by-step workflow (що робити далі)
+
+1. **Install dependencies** – run `npm install` once to fetch workspace packages.
+2. **Build core packages** – execute `npm run build --workspaces` so shared libraries compile before running apps.
+3. **Launch realtime preview** – start the Vite-powered PixiJS preview with `npm run dev` and open the provided URL in the browser to iterate on visuals.
+4. **Iterate on plugins and presets** – edit files in `packages/` or `apps/` while the dev server hot-reloads changes.
+5. **Run deterministic renders** – when satisfied with a loop, call `npm run render` to generate a frame sequence using the headless renderer.
+6. **Export to video** – finish by converting the frame sequence into an `.mp4` using `npm run export`.
+7. **Analyze audio (optional)** – use `npm run analyze` to precompute FFT data for audio-reactive scenes.
+
+Following these steps ensures a repeatable pipeline from development through deterministic export.
+
+## Далі за планом
+
+8. **Контролюйте версію** – фіксуйте стабільні зміни в Git, створюйте тематичні гілки та синхронізуйте їх із CI перед запуском рендерингу на сервері.
+9. **Перевіряйте узгодженість кадрів** – порівнюйте PNG-послідовності з попередніми версіями за допомогою інструментів типу `pixelmatch`, щоб уникнути небажаних відхилень під час ітерацій.
+10. **Оновлюйте аудіо-аналітику** – при змінах саундтреку повторно запускайте `npm run analyze`, кешуйте результат у репозиторії або CDN і підключайте через `@vis/audio`.
+11. **Оптимізуйте продуктивність** – профілюйте сцени через DevTools Performance/Memory, відключайте непотрібні плагіни та стежте за кількістю draw calls у PixiJS Inspector.
+12. **Автоматизуйте експорт** – готуйте npm-скрипти або GitHub Actions, що по черзі виконують `render` та `export`, зберігаючи результати в артефактах CI.
+13. **Готуйте реліз** – упаковуйте фінальні `.mp4` та супровідні дані (loop metadata, seed, версію плагінів), документуйте контрольні суми та публікуйте у каталозі preset-ів.
+
+Дотримання цих кроків допоможе довести цикл розробки від швидких ітерацій до надійних релізів без втрати детермінізму.
