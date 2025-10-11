@@ -115,6 +115,10 @@ export async function renderDeterministicFrames(options: OfflineRendererOptions)
       ? options.entry
       : pathToFileURL(resolve(options.entry)).toString();
     await page.goto(url, { waitUntil: "networkidle0" });
+    await page.waitForFunction(
+      () => Boolean((window as unknown as { __vis_ready?: boolean }).__vis_ready),
+      { timeout: 120_000 }
+    );
 
     for (let frame = 0; frame < options.totalFrames; frame++) {
       const time = (frame / options.fps) * 1000;

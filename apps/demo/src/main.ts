@@ -6,6 +6,14 @@ import { AudioController } from "@vis/audio";
 import { createTimelinePlugin } from "@vis/timeline";
 import { createPresetScene } from "@vis/presets";
 
+type RenderBridge = typeof window & {
+  __vis_renderFrame?: (ms: number) => Promise<void>;
+  __vis_ready?: boolean;
+};
+
+const renderBridge = window as RenderBridge;
+renderBridge.__vis_ready = false;
+
 const root = document.getElementById("app");
 
 if (!root) {
@@ -158,10 +166,11 @@ engine.once("engine:ready", () => {
   if (audio.isConnected) {
     setAudioState("ready");
   }
+  renderBridge.__vis_ready = true;
 });
 
 // Offline renderer hook expected by puppeteer pipeline.
-(window as typeof window & { __vis_renderFrame?: (ms: number) => Promise<void> }).__vis_renderFrame = async (ms: number) => {
+(renderBridge).__vis_renderFrame = async (ms: number) => {
   await engine.renderFrame(ms);
 };
 

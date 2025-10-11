@@ -26,6 +26,7 @@ export class PixiRenderer implements RendererPlugin {
       antialias: true,
       autoStart: false,
       backgroundColor: this.options.backgroundColor ?? 0x000000,
+      preserveDrawingBuffer: true,
       view: this.options.view,
       width: this.options.width ?? 1080,
       height: this.options.height ?? 1920,
