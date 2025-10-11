@@ -1,7 +1,6 @@
 import EventEmitter from "eventemitter3";
 import * as Tone from "tone";
 import Meyda from "meyda";
-import { createReadStream } from "fs";
 import type { AudioPlugin, AudioBeatEvent, AudioFFTEvent, VisEngine } from "@vis/core";
 
 export interface AudioControllerEvents {
@@ -75,7 +74,7 @@ export class AudioController extends EventEmitter<AudioControllerEvents> impleme
     for (let i = 0; i < samples.length; i += hop) {
       const slice = samples.subarray(i, i + hop);
       if (slice.length < hop) break;
-      const features = Meyda.extract("amplitudeSpectrum", slice);
+      const features = Meyda.extract("amplitudeSpectrum", slice) as number[] | null;
       if (!features) continue;
       const fft = Float32Array.from(features);
       const time = (i / samples.length) * (samples.length / 44100) * 1000;
@@ -86,6 +85,7 @@ export class AudioController extends EventEmitter<AudioControllerEvents> impleme
 }
 
 async function loadAudioBuffer(path: string): Promise<Float32Array> {
+  const { createReadStream } = await import("node:fs");
   const stream = createReadStream(path);
   const chunks: Buffer[] = [];
   for await (const chunk of stream) {
