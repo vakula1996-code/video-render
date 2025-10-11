@@ -9,15 +9,35 @@ import pixelmatch from "pixelmatch";
 import puppeteer from "puppeteer";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegStatic from "ffmpeg-static";
-import type { PNG } from "pngjs";
+import type { Buffer } from "buffer";
+import type { Duplex } from "stream";
 
-type PngModule = typeof import("pngjs");
+interface PngOptions {
+  width?: number;
+  height?: number;
+  fill?: boolean;
+}
+
+type PngInstance = Duplex & {
+  width: number;
+  height: number;
+  data: Buffer;
+  pack(): NodeJS.ReadableStream;
+  on(event: "parsed", callback: (this: PngInstance) => void): PngInstance;
+  on(event: "error", callback: (error: Error) => void): PngInstance;
+};
+
+type PngCtor = new (options?: PngOptions) => PngInstance;
+
+interface PngModule {
+  PNG: PngCtor;
+}
 type PixelmatchFn = typeof import("pixelmatch");
 
 let pngModulePromise: Promise<PngModule> | null = null;
 function loadPngModule(): Promise<PngModule> {
   if (!pngModulePromise) {
-    pngModulePromise = import("pngjs");
+    pngModulePromise = import("pngjs").then((module) => module as unknown as PngModule);
   }
   return pngModulePromise;
 }
@@ -326,18 +346,18 @@ async function collectPngs(dir: string): Promise<string[]> {
     .sort();
 }
 
-async function readPng(path: string, PngCtor: PngModule["PNG"]): Promise<PNG> {
-  return await new Promise<PNG>((resolve, reject) => {
+async function readPng(path: string, PngConstructor: PngCtor): Promise<PngInstance> {
+  return await new Promise<PngInstance>((resolve, reject) => {
     createReadStream(path)
-      .pipe(new PngCtor())
-      .on("parsed", function (this: PNG) {
+      .pipe(new PngConstructor())
+      .on("parsed", function (this: PngInstance) {
         resolve(this);
       })
       .on("error", reject);
   });
 }
 
-async function writePng(png: PNG, path: string): Promise<void> {
+async function writePng(png: PngInstance, path: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     png
       .pack()

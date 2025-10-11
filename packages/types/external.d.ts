@@ -29,27 +29,6 @@ declare module "fs-extra" {
   export function pathExists(path: string): Promise<boolean>;
 }
 
-declare module "pngjs" {
-  import { Duplex } from "stream";
-  import { Buffer } from "buffer";
-
-  export interface PNGOptions {
-    width?: number;
-    height?: number;
-    fill?: boolean;
-  }
-
-  export class PNG extends Duplex {
-    constructor(options?: PNGOptions);
-    width: number;
-    height: number;
-    data: Buffer;
-    pack(): NodeJS.ReadableStream;
-    on(event: "parsed", callback: (this: PNG) => void): this;
-    on(event: "error", callback: (error: Error) => void): this;
-  }
-}
-
 declare module "pixelmatch" {
   import { Buffer } from "buffer";
 
@@ -68,6 +47,32 @@ declare module "pixelmatch" {
   ): number;
 
   export = pixelmatch;
+}
+
+declare module "pngjs" {
+  import { Duplex } from "stream";
+  import { Buffer } from "buffer";
+
+  interface PNG extends Duplex {
+    width: number;
+    height: number;
+    data: Buffer;
+    pack(): NodeJS.ReadableStream;
+    on(event: "parsed", callback: (this: PNG) => void): this;
+    on(event: "error", callback: (error: Error) => void): this;
+  }
+
+  interface PNGConstructor {
+    new (options?: { width?: number; height?: number; fill?: boolean }): PNG;
+    prototype: PNG;
+  }
+
+  const pngjs: {
+    PNG: PNGConstructor;
+  };
+
+  export { PNG, PNGConstructor };
+  export = pngjs;
 }
 
 declare module "fluent-ffmpeg" {
