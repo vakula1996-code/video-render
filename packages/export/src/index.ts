@@ -9,6 +9,33 @@ import pixelmatch from "pixelmatch";
 import puppeteer from "puppeteer";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegStatic from "ffmpeg-static";
+import type { PNG } from "pngjs";
+
+type PngModule = typeof import("pngjs");
+type PixelmatchFn = typeof import("pixelmatch");
+
+let pngModulePromise: Promise<PngModule> | null = null;
+function loadPngModule(): Promise<PngModule> {
+  if (!pngModulePromise) {
+    pngModulePromise = import("pngjs");
+  }
+  return pngModulePromise;
+}
+
+let pixelmatchPromise: Promise<PixelmatchFn> | null = null;
+async function loadPixelmatch(): Promise<PixelmatchFn> {
+  if (!pixelmatchPromise) {
+    pixelmatchPromise = import("pixelmatch").then((module) => {
+      const asUnknown = module as unknown;
+      if (typeof asUnknown === "function") {
+        return asUnknown as PixelmatchFn;
+      }
+      const withDefault = asUnknown as { default?: PixelmatchFn };
+      return (withDefault.default ?? withDefault) as PixelmatchFn;
+    });
+  }
+  return pixelmatchPromise;
+}
 
 export interface OfflineRendererOptions {
   entry: string;
@@ -46,6 +73,7 @@ export async function renderDeterministicFrames(options: OfflineRendererOptions)
   await mkdirp(options.outDir);
   const browser = await puppeteer.launch({
     headless: "shell",
+    protocolTimeout: 120_000,
     args: [
       "--headless=new",
       "--enable-gpu",
@@ -56,25 +84,30 @@ export async function renderDeterministicFrames(options: OfflineRendererOptions)
       "--disable-dev-shm-usage",
     ],
   });
-  const page = await browser.newPage();
-  await page.setViewport({ width: options.width, height: options.height, deviceScaleFactor: 1 });
 
-  const url = options.entry.startsWith("http")
-    ? options.entry
-    : pathToFileURL(resolve(options.entry)).toString();
-  await page.goto(url);
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: options.width, height: options.height, deviceScaleFactor: 1 });
+    page.setDefaultTimeout(120_000);
+    page.setDefaultNavigationTimeout(120_000);
 
-  for (let frame = 0; frame < options.totalFrames; frame++) {
-    const time = (frame / options.fps) * 1000;
-    await page.evaluate((ms) => {
-      return (window as unknown as { __vis_renderFrame?: (ms: number) => Promise<void> }).__vis_renderFrame?.(ms);
-    }, time);
-    const outPath = join(options.outDir, `frame-${frame.toString().padStart(5, "0")}.png`);
-    await page.screenshot({ path: outPath });
-    results.push({ frame, path: outPath });
+    const url = options.entry.startsWith("http")
+      ? options.entry
+      : pathToFileURL(resolve(options.entry)).toString();
+    await page.goto(url, { waitUntil: "networkidle0" });
+
+    for (let frame = 0; frame < options.totalFrames; frame++) {
+      const time = (frame / options.fps) * 1000;
+      await page.evaluate((ms) => {
+        return (window as unknown as { __vis_renderFrame?: (ms: number) => Promise<void> }).__vis_renderFrame?.(ms);
+      }, time);
+      const outPath = join(options.outDir, `frame-${frame.toString().padStart(5, "0")}.png`);
+      await page.screenshot({ path: outPath });
+      results.push({ frame, path: outPath });
+    }
+  } finally {
+    await browser.close();
   }
-
-  await browser.close();
   return results;
 }
 
@@ -159,6 +192,7 @@ export interface RegressionSummary {
 }
 
 export async function compareFrameSequences(options: CompareFrameSequencesOptions): Promise<RegressionSummary> {
+  const [{ PNG }, pixelmatchFn] = await Promise.all([loadPngModule(), loadPixelmatch()]);
   const [actualFiles, baselineFiles] = await Promise.all([
     collectPngs(options.actualDir),
     collectPngs(options.baselineDir),
@@ -178,12 +212,12 @@ export async function compareFrameSequences(options: CompareFrameSequencesOption
   for (const file of intersection) {
     const baselinePath = join(options.baselineDir, file);
     const actualPath = join(options.actualDir, file);
-    const [baselinePng, actualPng] = await Promise.all([readPng(baselinePath), readPng(actualPath)]);
+    const [baselinePng, actualPng] = await Promise.all([readPng(baselinePath, PNG), readPng(actualPath, PNG)]);
     if (baselinePng.width !== actualPng.width || baselinePng.height !== actualPng.height) {
       throw new Error(`Frame size mismatch for ${file}`);
     }
     const diffPng = new PNG({ width: baselinePng.width, height: baselinePng.height });
-    const diffPixels = pixelmatch(
+    const diffPixels = pixelmatchFn(
       actualPng.data,
       baselinePng.data,
       diffPng.data,
@@ -292,10 +326,10 @@ async function collectPngs(dir: string): Promise<string[]> {
     .sort();
 }
 
-async function readPng(path: string): Promise<PNG> {
+async function readPng(path: string, PngCtor: PngModule["PNG"]): Promise<PNG> {
   return await new Promise<PNG>((resolve, reject) => {
     createReadStream(path)
-      .pipe(new PNG())
+      .pipe(new PngCtor())
       .on("parsed", function (this: PNG) {
         resolve(this);
       })

@@ -91,3 +91,39 @@ body {
   font-weight: 600;
   letter-spacing: 0.08em;
 }
+
+.vis-overlay__audio {
+  display: block;
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.vis-overlay__hint {
+  display: block;
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.vis-overlay--audio-blocked {
+  border-color: rgba(255, 200, 0, 0.24);
+  box-shadow: 0 18px 48px rgba(255, 200, 0, 0.18);
+}
+
+.vis-overlay--audio-blocked .vis-overlay__audio {
+  color: rgba(255, 220, 120, 0.92);
+}
+
+.vis-overlay--audio-error {
+  border-color: rgba(255, 120, 120, 0.28);
+  box-shadow: 0 18px 48px rgba(255, 120, 120, 0.22);
+}
+
+.vis-overlay--audio-error .vis-overlay__audio {
+  color: rgba(255, 150, 150, 0.9);
+}
+
+.vis-overlay--audio-ready .vis-overlay__audio {
+  color: rgba(0, 255, 184, 0.8);
+}
