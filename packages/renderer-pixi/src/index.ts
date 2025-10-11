@@ -22,12 +22,7 @@ export class PixiRenderer implements RendererPlugin {
   private postFxChain: (ColorMatrixFilter | BlurFilter)[] = [];
 
   constructor(private readonly options: PixiRendererOptions = {}) {
-    this.app = new Application();
-    this.stage = this.app.stage;
-  }
-
-  async setup(): Promise<void> {
-    await this.app.init({
+    this.app = new Application({
       antialias: true,
       autoStart: false,
       backgroundColor: this.options.backgroundColor ?? 0x000000,
@@ -35,6 +30,10 @@ export class PixiRenderer implements RendererPlugin {
       width: this.options.width ?? 1080,
       height: this.options.height ?? 1920,
     });
+    this.stage = this.app.stage;
+  }
+
+  async setup(): Promise<void> {
     this.postFxChain = this.options.postEffects?.map((factory) => factory()) ?? [];
     if (this.postFxChain.length > 0) {
       this.stage.filters = this.postFxChain;
@@ -42,11 +41,11 @@ export class PixiRenderer implements RendererPlugin {
   }
 
   update(event: EngineUpdateEvent): void {
-    void this.app.render();
+    this.app.render();
   }
 
   async renderFrame(): Promise<void> {
-    await this.app.render();
+    this.app.render();
   }
 
   /**
@@ -54,8 +53,8 @@ export class PixiRenderer implements RendererPlugin {
    */
   debugFrame(): void {
     const frame = new Graphics();
-    frame.rect(0, 0, this.app.renderer.width, this.app.renderer.height);
-    frame.stroke({ color: 0xffffff, width: 4, alpha: 0.08 });
+    frame.lineStyle({ width: 4, color: 0xffffff, alpha: 0.08 });
+    frame.drawRect(0, 0, this.app.renderer.width, this.app.renderer.height);
     this.stage.addChild(frame);
   }
 }
