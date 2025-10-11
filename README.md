@@ -16,10 +16,12 @@ Modular TypeScript toolkit for building deterministic, audio-reactive 2D video l
 ## Scripts
 
 ```bash
-npm run dev      # Launch the PixiJS realtime preview via Vite
-npm run render   # Run Puppeteer deterministic renderer
-npm run export   # Convert PNG sequences to mp4 via ffmpeg
-npm run analyze  # Offline Meyda FFT analysis helper
+npm run dev       # Launch the PixiJS realtime preview via Vite
+npm run render    # Run Puppeteer deterministic renderer
+npm run export    # Convert PNG sequences to mp4 via ffmpeg
+npm run analyze   # Offline Meyda FFT analysis helper
+npm run compare   # Compare rendered frames against a baseline with diff outputs
+npm run pipeline  # Render frames, encode video and emit a release manifest
 ```
 
 ## Development
@@ -47,10 +49,10 @@ Following these steps ensures a repeatable pipeline from development through det
 ## Далі за планом
 
 8. **Контролюйте версію** – фіксуйте стабільні зміни в Git, створюйте тематичні гілки та синхронізуйте їх із CI перед запуском рендерингу на сервері.
-9. **Перевіряйте узгодженість кадрів** – порівнюйте PNG-послідовності з попередніми версіями за допомогою інструментів типу `pixelmatch`, щоб уникнути небажаних відхилень під час ітерацій.
+9. **Перевіряйте узгодженість кадрів** – використовуйте `npm run compare`, щоб автоматично звірити нові PNG із базовою послідовністю та за потреби отримати diff-кадри.
 10. **Оновлюйте аудіо-аналітику** – при змінах саундтреку повторно запускайте `npm run analyze`, кешуйте результат у репозиторії або CDN і підключайте через `@vis/audio`.
 11. **Оптимізуйте продуктивність** – профілюйте сцени через DevTools Performance/Memory, відключайте непотрібні плагіни та стежте за кількістю draw calls у PixiJS Inspector.
-12. **Автоматизуйте експорт** – готуйте npm-скрипти або GitHub Actions, що по черзі виконують `render` та `export`, зберігаючи результати в артефактах CI.
-13. **Готуйте реліз** – упаковуйте фінальні `.mp4` та супровідні дані (loop metadata, seed, версію плагінів), документуйте контрольні суми та публікуйте у каталозі preset-ів.
+12. **Автоматизуйте експорт** – скрипт `npm run pipeline` послідовно побудує кадри, збере `.mp4` та збереже `manifest.json` з метаданими loop-у.
+13. **Готуйте реліз** – додавайте артефакти з manifest-файлом, seed-ом, контрольними сумами та відео у каталозі preset-ів або реліз-нотах.
 
 Дотримання цих кроків допоможе довести цикл розробки від швидких ітерацій до надійних релізів без втрати детермінізму.
