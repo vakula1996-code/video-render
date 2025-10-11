@@ -16,6 +16,6 @@
     "@vis/timeline": "^0.1.0"
   },
   "devDependencies": {
-    "rimraf": "^5.0.5"
+    "rimraf": "^5.0.7"
   }
 }

@@ -27,8 +27,9 @@ export async function renderDeterministicFrames(options: OfflineRendererOptions)
   const results: FrameRenderResult[] = [];
   await mkdirp(options.outDir);
   const browser = await puppeteer.launch({
-    headless: "new",
+    headless: "shell",
     args: [
+      "--headless=new",
       "--enable-gpu",
       "--ignore-gpu-blocklist",
       "--use-gl=angle",
