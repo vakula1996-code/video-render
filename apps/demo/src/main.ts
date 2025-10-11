@@ -131,6 +131,20 @@ const requestAudioUnlock = () => {
 
 setAudioState("pending");
 
+const markEngineReady = () => {
+  if (renderBridge.__vis_ready) {
+    return;
+  }
+  overlay.classList.add("vis-overlay--ready");
+  overlayTitle.textContent = "Петля активна";
+  overlayStatus.innerHTML = "Сцена <em>CollisionLoop</em> вже працює.";
+  overlayHint.hidden = false;
+  if (audio.isConnected) {
+    setAudioState("ready");
+  }
+  renderBridge.__vis_ready = true;
+};
+
 (async () => {
   await engine.registerPlugin(renderer);
   renderer.debugFrame();
@@ -140,6 +154,11 @@ setAudioState("pending");
   const scene = createPresetScene("CollisionLoop", { engine, renderer, timeline });
   await engine.loadScene(scene);
   engine.start();
+
+  // У браузерах із заблокованими rAF або нестандартними таймерами подія engine:ready може не спрацювати миттєво,
+  // тож страхуємося прямим викликом маркера готовності та повторною перевіркою після короткої паузи.
+  markEngineReady();
+  window.setTimeout(markEngineReady, 250);
 
   audio
     .connect()
@@ -159,19 +178,13 @@ setAudioState("pending");
 })();
 
 engine.once("engine:ready", () => {
-  overlay.classList.add("vis-overlay--ready");
-  overlayTitle.textContent = "Петля активна";
-  overlayStatus.innerHTML = "Сцена <em>CollisionLoop</em> вже працює.";
-  overlayHint.hidden = false;
-  if (audio.isConnected) {
-    setAudioState("ready");
-  }
-  renderBridge.__vis_ready = true;
+  markEngineReady();
 });
 
 // Offline renderer hook expected by puppeteer pipeline.
 (renderBridge).__vis_renderFrame = async (ms: number) => {
   await engine.renderFrame(ms);
+  markEngineReady();
 };
 
 const restartLoop = () => {
