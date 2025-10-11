@@ -1,7 +1,6 @@
 import EventEmitter from "eventemitter3";
 import * as Tone from "tone";
 import Meyda from "meyda";
-import { createReadStream } from "fs";
 import type { AudioPlugin, AudioBeatEvent, AudioFFTEvent, VisEngine } from "@vis/core";
 
 export interface AudioControllerEvents {
@@ -28,6 +27,8 @@ export class AudioController extends EventEmitter<AudioControllerEvents> impleme
   readonly name = "@vis/audio";
   private engine?: VisEngine;
   private beatIndex = 0;
+  private connected = false;
+  private connectTask: Promise<void> | null = null;
   private readonly options: Required<AudioControllerOptions>;
 
   constructor(options: AudioControllerOptions = {}) {
@@ -43,20 +44,61 @@ export class AudioController extends EventEmitter<AudioControllerEvents> impleme
     this.engine = engine;
   }
 
+  get isConnected(): boolean {
+    return this.connected;
+  }
+
   async connect(): Promise<void> {
-    await Tone.start();
-    Tone.Transport.bpm.value = this.options.bpm;
-    Tone.Transport.scheduleRepeat((time) => {
-      this.emitBeat("beat", time);
-    }, "4n");
+    if (this.connected) {
+      return;
+    }
+    if (this.connectTask) {
+      return this.connectTask;
+    }
 
-    Tone.Transport.scheduleRepeat((time) => {
-      if (this.beatIndex % this.options.beatsPerBar === 0) {
-        this.emitBeat("bar", time);
+    this.connectTask = (async () => {
+      const startPromise = Tone.start();
+      let timeout: NodeJS.Timeout | null = null;
+      try {
+        await Promise.race([
+          startPromise,
+          new Promise<void>((_, reject) => {
+            timeout = setTimeout(() => {
+              reject(new Error("Tone.js start timeout"));
+            }, 2000);
+          }),
+        ]);
+      } finally {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
       }
-    }, `${this.options.beatsPerBar}n`);
 
-    Tone.Transport.start();
+      if (this.connected) {
+        return;
+      }
+
+      await startPromise;
+      Tone.Transport.bpm.value = this.options.bpm;
+      Tone.Transport.scheduleRepeat((time) => {
+        this.emitBeat("beat", time);
+      }, "4n");
+
+      Tone.Transport.scheduleRepeat((time) => {
+        if (this.beatIndex % this.options.beatsPerBar === 0) {
+          this.emitBeat("bar", time);
+        }
+      }, `${this.options.beatsPerBar}n`);
+
+      Tone.Transport.start();
+      this.connected = true;
+    })();
+
+    try {
+      await this.connectTask;
+    } finally {
+      this.connectTask = null;
+    }
   }
 
   private emitBeat(event: AudioEventName, time: number): void {
@@ -75,7 +117,7 @@ export class AudioController extends EventEmitter<AudioControllerEvents> impleme
     for (let i = 0; i < samples.length; i += hop) {
       const slice = samples.subarray(i, i + hop);
       if (slice.length < hop) break;
-      const features = Meyda.extract("amplitudeSpectrum", slice);
+      const features = Meyda.extract("amplitudeSpectrum", slice) as number[] | null;
       if (!features) continue;
       const fft = Float32Array.from(features);
       const time = (i / samples.length) * (samples.length / 44100) * 1000;
@@ -86,6 +128,7 @@ export class AudioController extends EventEmitter<AudioControllerEvents> impleme
 }
 
 async function loadAudioBuffer(path: string): Promise<Float32Array> {
+  const { createReadStream } = await import("node:fs");
   const stream = createReadStream(path);
   const chunks: Buffer[] = [];
   for await (const chunk of stream) {
