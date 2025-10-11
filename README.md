@@ -1,33 +1,58 @@
 # VIS Monorepo
 
-Modular TypeScript toolkit for building deterministic, audio-reactive 2D video loops. The monorepo is organized into packages that can be composed for real-time WebGL2 rendering, offline deterministic export, and future editor tooling.
+Модульний набір інструментів на TypeScript для побудови детермінованих, аудіореактивних 2D-відеопетель. Монорепозиторій організований у пакети, які можна компонувати для рендерингу в реальному часі на WebGL2, офлайнового детермінованого експорту та майбутніх редакторських інструментів.
 
-## Packages
+## Пакети
 
-- **@vis/core** — Deterministic engine core with plugin lifecycle, loop controller, and seeded randomness utilities.
-- **@vis/renderer-pixi** — PixiJS/WebGL2 renderer with future-ready post-processing hooks (aligned to PixiJS 7.4 filter APIs).
-- **@vis/audio** — Tone.js transport plus Meyda FFT analysis for beat and spectrum events.
-- **@vis/timeline** — GSAP integration and audio-synchronized timeline bindings.
-- **@vis/physics** — Optional Matter.js adapter for rigid-body simulations.
-- **@vis/export** — Offline headless rendering pipeline for Puppeteer + ffmpeg exports.
-- **@vis/presets** — Sample scenes demonstrating loop patterns and deterministic control.
-- **@vis/editor** — Reserved workspace for upcoming visual editor (not yet implemented).
+- **@vis/core** — детерміноване ядро рушія з життєвим циклом плагінів, контролером петлі та утилітами для псевдовипадковості за зерном.
+- **@vis/renderer-pixi** — рендерер на PixiJS/WebGL2 з гачками для майбутніх постобробних ефектів (узгоджений із фільтрами PixiJS 7.4).
+- **@vis/audio** — транспорт Tone.js та аналізатор FFT Meyda для подій ритму й спектра.
+- **@vis/timeline** — інтеграція з GSAP та аудіосинхронізованими таймлайнами.
+- **@vis/physics** — опційний адаптер Matter.js для симуляцій твердих тіл.
+- **@vis/export** — офлайнова headless-пайплайна для експорту через Puppeteer + ffmpeg.
+- **@vis/presets** — приклади сцен, що демонструють патерни петель і детермінований контроль.
+- **@vis/editor** — зарезервований робочий простір під майбутній візуальний редактор (ще не реалізовано).
 
-## Scripts
+## Скрипти
 
 ```bash
-npm run dev      # Launch the PixiJS realtime preview via Vite
-npm run render   # Run Puppeteer deterministic renderer
-npm run export   # Convert PNG sequences to mp4 via ffmpeg
-npm run analyze  # Offline Meyda FFT analysis helper
+npm run dev       # Запустити попередній перегляд PixiJS у реальному часі через Vite
+npm run render    # Запустити детермінований рендерер Puppeteer
+npm run export    # Конвертувати послідовність PNG у mp4 через ffmpeg
+npm run analyze   # Запустити утиліту офлайнового аналізу FFT Meyda
+npm run compare   # Порівняти відрендерені кадри з еталоном і отримати diff-кадри
+npm run pipeline  # Послідовно відрендерити кадри, закодувати відео й сформувати маніфест релізу
 ```
 
-## Development
+## Розробка
 
-- Build packages with `npm run build --workspaces`.
-- Packages use `tsup` for dual CJS/ESM output and TypeScript declarations.
-- Offline rendering expects `window.__vis_renderFrame(timeMs)` to be defined by the loaded page.
-- Packages are version-locked to the latest compatible PixiJS 7.4, Tone.js 14.8, Meyda 5.6, and Puppeteer 22 releases to prevent transitive conflicts between realtime and offline renderers.
-- Puppeteer is configured with GPU flags for headless WebGL2 support.
+- Збирайте пакети командою `npm run build --workspaces`.
+- Пакети збираються через `tsup`, що генерує CJS/ESM вихід і декларації TypeScript.
+- Офлайновий рендер очікує, що сторінка визначить `window.__vis_renderFrame(timeMs)`.
+- Версії пакетів зафіксовані на сумісних релізах PixiJS 7.4, Tone.js 14.8, Meyda 5.6 та Puppeteer 22, щоб уникнути конфліктів між рендерерами реального часу та офлайном.
+- Puppeteer налаштовано з GPU-флагами для підтримки WebGL2 у headless-режимі.
 
-Add new plugins by implementing the `VisPlugin` interface in `@vis/core` and registering it on the `VisEngine` instance.
+Додавайте нові плагіни, реалізовуючи інтерфейс `VisPlugin` з `@vis/core` та реєструючи їх на екземплярі `VisEngine`.
+
+## Покроковий робочий процес
+
+1. **Встановіть залежності** – один раз виконайте `npm install`, щоб отримати пакети workspace.
+2. **Зберіть основні пакети** – запустіть `npm run build --workspaces`, аби спільні бібліотеки скомпілювалися перед запуском застосунків.
+3. **Запустіть попередній перегляд** – стартуйте Vite-сервер із `npm run dev` і відкрийте надану адресу в браузері для роботи з візуалом.
+4. **Ітеруйте над плагінами й пресетами** – редагуйте файли в `packages/` або `apps/`, поки dev-сервер гаряче перезавантажує зміни.
+5. **Виконайте детермінований рендер** – коли петля готова, виконайте `npm run render`, щоб згенерувати послідовність кадрів у headless-режимі.
+6. **Експортуйте відео** – завершіть цикл, конвертувавши кадри у `.mp4` за допомогою `npm run export`.
+7. **Проаналізуйте аудіо (опційно)** – скористайтеся `npm run analyze`, щоб попередньо обчислити дані FFT для аудіореактивних сцен.
+
+Дотримання цих кроків гарантує відтворюваний шлях від розробки до детермінованого експорту.
+
+## Далі за планом
+
+8. **Контролюйте версію** – фіксуйте стабільні зміни в Git, створюйте тематичні гілки та синхронізуйте їх із CI перед запуском рендерингу на сервері.
+9. **Перевіряйте узгодженість кадрів** – використовуйте `npm run compare`, щоб автоматично звірити нові PNG з базовою послідовністю та за потреби отримати diff-кадри.
+10. **Оновлюйте аудіо-аналітику** – при зміні саундтреку повторно запускайте `npm run analyze`, кешуйте результат у репозиторії або CDN та підключайте через `@vis/audio`.
+11. **Оптимізуйте продуктивність** – профілюйте сцени через DevTools Performance/Memory, відключайте зайві плагіни та відстежуйте кількість draw calls у PixiJS Inspector.
+12. **Автоматизуйте експорт** – скрипт `npm run pipeline` послідовно згенерує кадри, збере `.mp4` і збереже `manifest.json` із метаданими петлі.
+13. **Готуйте реліз** – додавайте артефакти з маніфестом, seed-ом, контрольними сумами та відео в каталог пресетів або реліз-ноти.
+
+Послідовне виконання цих кроків допоможе пройти шлях від швидких ітерацій до надійних релізів без втрати детермінізму.

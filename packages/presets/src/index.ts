@@ -38,8 +38,9 @@ export class CollisionLoop extends PixiPresetScene {
     stage.removeChildren();
     this.orbs = Array.from({ length: 5 }, (_, index) => {
       const g = new Graphics();
-      g.circle(0, 0, 80);
-      g.fill({ color: 0xff00ff >> index });
+      g.beginFill(0xff00ff >> index);
+      g.drawCircle(0, 0, 80);
+      g.endFill();
       stage.addChild(g);
       return g;
     });
@@ -72,8 +73,9 @@ export class BreathingField extends PixiPresetScene {
     for (let x = 1; x <= grid; x++) {
       for (let y = 1; y <= grid; y++) {
         const dot = new Graphics();
-        dot.circle(0, 0, 12);
-        dot.fill({ color: 0x00ffff, alpha: 0.4 });
+        dot.beginFill(0x00ffff, 0.4);
+        dot.drawCircle(0, 0, 12);
+        dot.endFill();
         dot.position.set(spacing * x, spacing * y);
         stage.addChild(dot);
         this.dots.push(dot);
@@ -100,9 +102,11 @@ export class SymmetryBreaker extends PixiPresetScene {
     stage.removeChildren();
     for (let i = 0; i < 6; i++) {
       const petal = new Graphics();
+      petal.beginFill(0xffffff, 0.1);
       petal.moveTo(0, 0);
       petal.arc(0, 0, 400, 0, Math.PI / 4);
-      petal.fill({ color: 0xffffff, alpha: 0.1 });
+      petal.lineTo(0, 0);
+      petal.endFill();
       stage.addChild(petal);
       this.petals.push(petal);
     }
