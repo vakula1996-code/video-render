@@ -22,19 +22,19 @@ export class PixiRenderer implements RendererPlugin {
   private postFxChain: (ColorMatrixFilter | BlurFilter)[] = [];
 
   constructor(private readonly options: PixiRendererOptions = {}) {
-    this.app = new Application({
-      antialias: true,
-      autoStart: false,
-      backgroundColor: options.backgroundColor ?? 0x000000,
-      view: options.view,
-      width: options.width ?? 1080,
-      height: options.height ?? 1920,
-    });
+    this.app = new Application();
     this.stage = this.app.stage;
   }
 
   async setup(): Promise<void> {
-    await this.app.init();
+    await this.app.init({
+      antialias: true,
+      autoStart: false,
+      backgroundColor: this.options.backgroundColor ?? 0x000000,
+      view: this.options.view,
+      width: this.options.width ?? 1080,
+      height: this.options.height ?? 1920,
+    });
     this.postFxChain = this.options.postEffects?.map((factory) => factory()) ?? [];
     if (this.postFxChain.length > 0) {
       this.stage.filters = this.postFxChain;
@@ -42,7 +42,7 @@ export class PixiRenderer implements RendererPlugin {
   }
 
   update(event: EngineUpdateEvent): void {
-    this.app.render();
+    void this.app.render();
   }
 
   async renderFrame(): Promise<void> {

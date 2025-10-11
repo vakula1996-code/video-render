@@ -5,7 +5,7 @@ Modular TypeScript toolkit for building deterministic, audio-reactive 2D video l
 ## Packages
 
 - **@vis/core** — Deterministic engine core with plugin lifecycle, loop controller, and seeded randomness utilities.
-- **@vis/renderer-pixi** — PixiJS/WebGL2 renderer with future-ready post-processing hooks.
+- **@vis/renderer-pixi** — PixiJS/WebGL2 renderer with future-ready post-processing hooks (aligned to PixiJS 7.4 filter APIs).
 - **@vis/audio** — Tone.js transport plus Meyda FFT analysis for beat and spectrum events.
 - **@vis/timeline** — GSAP integration and audio-synchronized timeline bindings.
 - **@vis/physics** — Optional Matter.js adapter for rigid-body simulations.
@@ -27,6 +27,7 @@ npm run analyze  # Offline Meyda FFT analysis helper
 - Build packages with `npm run build --workspaces`.
 - Packages use `tsup` for dual CJS/ESM output and TypeScript declarations.
 - Offline rendering expects `window.__vis_renderFrame(timeMs)` to be defined by the loaded page.
+- Packages are version-locked to the latest compatible PixiJS 7.4, Tone.js 14.8, Meyda 5.6, and Puppeteer 22 releases to prevent transitive conflicts between realtime and offline renderers.
 - Puppeteer is configured with GPU flags for headless WebGL2 support.
 
 Add new plugins by implementing the `VisPlugin` interface in `@vis/core` and registering it on the `VisEngine` instance.

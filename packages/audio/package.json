@@ -13,12 +13,12 @@
   "dependencies": {
     "eventemitter3": "^5.0.1",
     "meyda": "^5.6.3",
-    "tone": "^14.8.49"
+    "tone": "^14.8.52"
   },
   "peerDependencies": {
     "@vis/core": "^0.1.0"
   },
   "devDependencies": {
-    "rimraf": "^5.0.5"
+    "rimraf": "^5.0.7"
   }
 }
