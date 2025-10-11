@@ -106,12 +106,13 @@ export interface ExportVideoOptions {
  * Wraps ffmpeg invocation to build perfect mp4/prores loops from PNG sequences.
  */
 export async function encodeVideo(options: ExportVideoOptions): Promise<void> {
-  if (!ffmpegStatic) {
+  const binaryPath = ffmpegStatic;
+  if (binaryPath == null) {
     throw new Error("ffmpeg-static binary not found");
   }
   await new Promise<void>((resolvePromise, rejectPromise) => {
     ffmpeg()
-      .setFfmpegPath(ffmpegStatic)
+      .setFfmpegPath(binaryPath)
       .input(options.inputPattern)
       .inputOptions(["-framerate", options.fps.toString()])
       .videoCodec(options.codec ?? "libx264")
@@ -122,7 +123,7 @@ export async function encodeVideo(options: ExportVideoOptions): Promise<void> {
       ])
       .output(options.outputFile)
       .on("end", () => resolvePromise())
-      .on("error", (error) => rejectPromise(error))
+      .on("error", (error: Error) => rejectPromise(error))
       .run();
   });
 }
