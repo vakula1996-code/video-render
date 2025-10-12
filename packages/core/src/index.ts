@@ -1,6 +1,6 @@
 import EventEmitter from "eventemitter3";
 import seedrandom from "seedrandom";
-import SimplexNoise from "simplex-noise";
+import { createNoise2D, createNoise3D, type NoiseFunction2D, type NoiseFunction3D } from "simplex-noise";
 
 /**
  * Core types used across the visualization engine. Scenes, plugins, renderers and audio emitters
@@ -98,11 +98,14 @@ export class DeterministicClock {
 
 export class SeededRandom {
   private readonly rng: seedrandom.prng;
-  private readonly simplex: SimplexNoise;
+  private readonly simplex2D: NoiseFunction2D;
+  private readonly simplex3D: NoiseFunction3D;
 
   constructor(seed: string) {
     this.rng = seedrandom(seed, { state: true });
-    this.simplex = new SimplexNoise(this.rng);
+    const randomFn = () => this.rng.quick();
+    this.simplex2D = createNoise2D(randomFn);
+    this.simplex3D = createNoise3D(randomFn);
   }
 
   next(): number {
@@ -113,11 +116,11 @@ export class SeededRandom {
    * 2D/3D simplex noise helper. Values are deterministic for a given seed.
    */
   noise2D(x: number, y: number): number {
-    return this.simplex.noise2D(x, y);
+    return this.simplex2D(x, y);
   }
 
   noise3D(x: number, y: number, z: number): number {
-    return this.simplex.noise3D(x, y, z);
+    return this.simplex3D(x, y, z);
   }
 }
 
