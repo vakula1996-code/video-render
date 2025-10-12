@@ -299,51 +299,8 @@ async function renderWithHeadless(
     ? options.entry
     : pathToFileURL(resolve(options.entry)).toString();
 
-  const launchAttempts = resolveLaunchAttempts(headless);
+  const launchProfiles = buildLaunchProfiles(headless);
   let lastError: unknown = null;
-
-  const launchAttempts = resolveLaunchAttempts(headless);
-  let lastError: unknown = null;
-
-  throw new Error("Offline render failed to initialize a renderer");
-}
-
-interface LaunchAttempt {
-  description: string;
-  args: string[];
-}
-
-function resolveLaunchAttempts(headless: HeadlessMode): LaunchAttempt[] {
-  const baseArgs = [
-    ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
-    "--autoplay-policy=no-user-gesture-required",
-    "--disable-dev-shm-usage",
-  ];
-
-  const gpuArgs = ["--enable-gpu", "--ignore-gpu-blocklist"];
-
-  return [
-    {
-      description: "ANGLE OpenGL",
-      args: [...baseArgs, ...gpuArgs, "--use-gl=angle", "--use-angle=opengl"],
-    },
-    {
-      description: "SwiftShader",
-      args: [...baseArgs, ...gpuArgs, "--use-gl=swiftshader", "--use-angle=swiftshader"],
-    },
-    {
-      description: "Software fallback",
-      args: [...baseArgs, "--disable-gpu", "--use-gl=swiftshader"],
-    },
-  ];
-}
-
-function isRendererAutoDetectError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  return /Unable to auto-detect a suitable renderer/i.test(error.message);
-}
 
 async function renderWithLaunchProfile(
   options: OfflineRendererOptions,
@@ -353,21 +310,21 @@ async function renderWithLaunchProfile(
 ): Promise<FrameRenderResult[]> {
   let browser: Browser | null = null;
   try {
-    for (const attempt of launchAttempts) {
+    for (const profile of launchProfiles) {
       try {
-        return await renderWithLaunchProfile(options, headless, entryUrl, attempt);
+        return await renderWithProfile(options, headless, entryUrl, profile);
       } catch (error) {
         const failure = error instanceof Error ? error : new Error(String(error));
-        const annotated = annotateLaunchAttemptFailure(failure, attempt, headless);
+        const annotated = annotateLaunchProfileFailure(failure, profile, headless);
         lastError = annotated;
-        if (!isRendererAutoDetectError(annotated)) {
+        if (!isRendererAutoDetectIssue(annotated)) {
           throw annotated;
         }
-        if (attempt === launchAttempts[launchAttempts.length - 1]) {
+        if (profile === launchProfiles[launchProfiles.length - 1]) {
           throw annotated;
         }
         console.warn(
-          `[vis-export] Renderer auto-detection failed using ${attempt.description}. Retrying with next launch profile.`,
+          `[vis-export] Renderer auto-detection failed using ${profile.description}. Retrying with next launch profile.`,
           annotated
         );
       }
@@ -389,114 +346,13 @@ async function renderWithLaunchProfile(
   throw new Error("Offline render failed to initialize a renderer");
 }
 
-interface LaunchAttempt {
+interface LaunchProfile {
   description: string;
   args: string[];
   ignoreDefaultArgs?: string[];
 }
 
-function resolveLaunchAttempts(headless: HeadlessMode): LaunchAttempt[] {
-  const baseArgs = [
-    ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
-    "--autoplay-policy=no-user-gesture-required",
-    "--disable-dev-shm-usage",
-  ];
-
-  const gpuArgs = [
-    "--enable-gpu",
-    "--ignore-gpu-blocklist",
-    "--enable-webgl",
-    "--enable-webgl2",
-    "--enable-accelerated-2d-canvas",
-  ];
-
-  const gpuDefaultArgBlocklist = ["--disable-gpu", "--disable-software-rasterizer"];
-
-  return [
-    {
-      description: "ANGLE OpenGL",
-      args: [...baseArgs, ...gpuArgs, "--use-gl=angle", "--use-angle=opengl"],
-      ignoreDefaultArgs: gpuDefaultArgBlocklist,
-    },
-    {
-      description: "SwiftShader",
-      args: [...baseArgs, ...gpuArgs, "--use-gl=swiftshader", "--use-angle=swiftshader"],
-      ignoreDefaultArgs: gpuDefaultArgBlocklist,
-    },
-    {
-      description: "Software fallback",
-      args: [...baseArgs, "--disable-gpu", "--use-gl=swiftshader"],
-    },
-  ];
-}
-
-function annotateLaunchAttemptFailure(error: Error, attempt: LaunchAttempt, headless: HeadlessMode): Error {
-  const context = `Chromium launch profile "${attempt.description}" (headless=${describeHeadless(headless)})`;
-  if (!error.message.includes(context)) {
-    error.message = `${context}: ${error.message}`;
-  }
-  return error;
-}
-
-function isRendererAutoDetectError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  return /Unable to auto-detect a suitable renderer/i.test(error.message);
-}
-
-async function renderWithLaunchProfile(
-  options: OfflineRendererOptions,
-  headless: HeadlessMode,
-  entryUrl: string,
-  attempt: LaunchAttempt
-): Promise<FrameRenderResult[]> {
-  let browser: Browser | null = null;
-  const protocolTimeout = resolveProtocolTimeout();
-  try {
-    for (const attempt of launchAttempts) {
-      try {
-        return await renderWithLaunchProfile(options, headless, entryUrl, attempt);
-      } catch (error) {
-        const failure = error instanceof Error ? error : new Error(String(error));
-        const annotated = annotateLaunchAttemptFailure(failure, attempt, headless);
-        lastError = annotated;
-        if (!isRendererAutoDetectError(annotated)) {
-          throw annotated;
-        }
-        if (attempt === launchAttempts[launchAttempts.length - 1]) {
-          throw annotated;
-        }
-        console.warn(
-          `[vis-export] Renderer auto-detection failed using ${attempt.description}. Retrying with next launch profile.`,
-          annotated
-        );
-      }
-    }
-  } finally {
-    if (staticServer) {
-      try {
-        await withStep("Stopping static entry server", () => staticServer.close());
-      } catch (error) {
-        console.warn("[vis-export] Failed to stop static entry server cleanly.", error);
-      }
-    }
-  }
-
-  if (lastError) {
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
-  }
-
-  throw new Error("Offline render failed to initialize a renderer");
-}
-
-interface LaunchAttempt {
-  description: string;
-  args: string[];
-  ignoreDefaultArgs?: string[];
-}
-
-function resolveLaunchAttempts(headless: HeadlessMode): LaunchAttempt[] {
+function buildLaunchProfiles(headless: HeadlessMode): LaunchProfile[] {
   const baseArgs = [
     ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
     "--autoplay-policy=no-user-gesture-required",
@@ -532,16 +388,16 @@ function resolveLaunchAttempts(headless: HeadlessMode): LaunchAttempt[] {
 }
 
 async function launchChromium(
-  attempt: LaunchAttempt,
+  profile: LaunchProfile,
   headless: HeadlessMode,
   protocolTimeout: number
 ): Promise<Browser> {
-  return await withStep(`Launching Chromium (${attempt.description})`, () =>
+  return await withStep(`Launching Chromium (${profile.description})`, () =>
     puppeteer.launch({
       headless,
       protocolTimeout,
-      args: attempt.args,
-      ignoreDefaultArgs: attempt.ignoreDefaultArgs,
+      args: profile.args,
+      ignoreDefaultArgs: profile.ignoreDefaultArgs,
     })
   );
 }
@@ -603,31 +459,31 @@ async function renderPlaceholderFrames(options: OfflineRendererOptions): Promise
   });
 }
 
-function annotateLaunchAttemptFailure(error: Error, attempt: LaunchAttempt, headless: HeadlessMode): Error {
-  const context = `Chromium launch profile "${attempt.description}" (headless=${describeHeadless(headless)})`;
+function annotateLaunchProfileFailure(error: Error, profile: LaunchProfile, headless: HeadlessMode): Error {
+  const context = `Chromium launch profile "${profile.description}" (headless=${describeHeadless(headless)})`;
   if (!error.message.includes(context)) {
     error.message = `${context}: ${error.message}`;
   }
   return error;
 }
 
-function isRendererAutoDetectError(error: unknown): boolean {
+function isRendererAutoDetectIssue(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
   return /Unable to auto-detect a suitable renderer/i.test(error.message);
 }
 
-async function renderWithLaunchProfile(
+async function renderWithProfile(
   options: OfflineRendererOptions,
   headless: HeadlessMode,
   entryUrl: string,
-  attempt: LaunchAttempt
+  profile: LaunchProfile
 ): Promise<FrameRenderResult[]> {
   let browser: Browser | null = null;
   const protocolTimeout = resolveProtocolTimeout();
   try {
-    browser = await launchChromium(attempt, headless, protocolTimeout);
+    browser = await launchChromium(profile, headless, protocolTimeout);
 
     const page = await withStep("Opening new page", () => browser!.newPage());
     await withStep(
