@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { createReadStream, createWriteStream } from "fs";
 import { mkdirp, pathExists } from "fs-extra";
-import { readdir, stat, writeFile, mkdir, readFile } from "fs/promises";
+import { readdir, stat, writeFile, mkdir, readFile, copyFile } from "fs/promises";
 import { join, resolve, relative, dirname, extname, sep } from "path";
 import { createServer, type Server } from "http";
 import { pathToFileURL } from "url";
@@ -63,6 +63,24 @@ async function loadPixelmatch(): Promise<PixelmatchFn> {
 const DEFAULT_PROTOCOL_TIMEOUT_MS = 120_000;
 let cachedProtocolTimeout: number | null = null;
 let warnedProtocolTimeout = false;
+
+const MISSING_SHARED_LIBRARY_REGEX =
+  /error while loading shared libraries:\s*([^:]+): cannot open shared object file/i;
+
+function extractMissingSharedLibraries(error: unknown): string[] {
+  if (!(error instanceof Error) || typeof error.message !== "string") {
+    return [];
+  }
+  const matches: string[] = [];
+  const regex = new RegExp(MISSING_SHARED_LIBRARY_REGEX.source, "gi");
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(error.message)) != null) {
+    if (match[1]) {
+      matches.push(match[1]);
+    }
+  }
+  return matches;
+}
 
 function resolveProtocolTimeout(): number {
   if (cachedProtocolTimeout != null) {
@@ -183,30 +201,47 @@ export async function renderDeterministicFrames(options: OfflineRendererOptions)
     ...options,
     entry: await ensureHtmlEntry(options.entry),
   };
-  const headlessPreferences = resolveHeadlessPreference();
-  let lastError: unknown;
-  for (const [index, headless] of headlessPreferences.entries()) {
-    try {
-      return await renderWithHeadless(normalizedOptions, headless);
-    } catch (error) {
-      const failure = error instanceof Error ? error : new Error(String(error));
-      lastError = failure;
-      const isShell = headless === "shell";
-      const hasNext = index < headlessPreferences.length - 1;
-      const recoverable = isShell && hasNext && isRecoverableShellError(failure);
-      const headlessLabel = describeHeadless(headless);
-      if (recoverable) {
-        console.warn(
-          `[vis-export] Offline render attempt with headless=${headlessLabel} failed but will retry with the next preference.`,
-          failure
-        );
-        continue;
+
+  try {
+    const headlessPreferences = resolveHeadlessPreference();
+    let lastError: unknown;
+    for (const [index, headless] of headlessPreferences.entries()) {
+      try {
+        return await renderWithHeadless(normalizedOptions, headless);
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        lastError = failure;
+        if (shouldFallbackToPlaceholderFrames(failure)) {
+          throw failure;
+        }
+        const isShell = headless === "shell";
+        const hasNext = index < headlessPreferences.length - 1;
+        const recoverable = isShell && hasNext && isRecoverableShellError(failure);
+        const headlessLabel = describeHeadless(headless);
+        if (recoverable) {
+          console.warn(
+            `[vis-export] Offline render attempt with headless=${headlessLabel} failed but will retry with the next preference.`,
+            failure
+          );
+          continue;
+        }
+        console.error(`[vis-export] Offline render failed with headless=${headlessLabel}.`, failure);
+        break;
       }
       console.error(`[vis-export] Offline render failed with headless=${headlessLabel}.`, failure);
       break;
     }
+    throw lastError instanceof Error ? lastError : new Error("Offline render failed");
+  } catch (error) {
+    if (shouldFallbackToPlaceholderFrames(error)) {
+      console.warn(
+        "[vis-export] Falling back to placeholder frame rendering because Chromium dependencies are unavailable.",
+        error
+      );
+      return await renderPlaceholderFrames(normalizedOptions);
+    }
+    throw error;
   }
-  throw lastError instanceof Error ? lastError : new Error("Offline render failed");
 }
 
 type LaunchOptions = NonNullable<PuppeteerLaunchOptions>;
@@ -263,6 +298,9 @@ async function renderWithHeadless(
     : options.entry.startsWith("http")
     ? options.entry
     : pathToFileURL(resolve(options.entry)).toString();
+
+  const launchAttempts = resolveLaunchAttempts(headless);
+  let lastError: unknown = null;
 
   const launchAttempts = resolveLaunchAttempts(headless);
   let lastError: unknown = null;
@@ -416,14 +454,180 @@ async function renderWithLaunchProfile(
   let browser: Browser | null = null;
   const protocolTimeout = resolveProtocolTimeout();
   try {
-    browser = await withStep(`Launching Chromium (${attempt.description})`, () =>
-      puppeteer.launch({
-        headless,
-        protocolTimeout,
-        args: attempt.args,
-        ignoreDefaultArgs: attempt.ignoreDefaultArgs,
-      })
-    );
+    for (const attempt of launchAttempts) {
+      try {
+        return await renderWithLaunchProfile(options, headless, entryUrl, attempt);
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        const annotated = annotateLaunchAttemptFailure(failure, attempt, headless);
+        lastError = annotated;
+        if (!isRendererAutoDetectError(annotated)) {
+          throw annotated;
+        }
+        if (attempt === launchAttempts[launchAttempts.length - 1]) {
+          throw annotated;
+        }
+        console.warn(
+          `[vis-export] Renderer auto-detection failed using ${attempt.description}. Retrying with next launch profile.`,
+          annotated
+        );
+      }
+    }
+  } finally {
+    if (staticServer) {
+      try {
+        await withStep("Stopping static entry server", () => staticServer.close());
+      } catch (error) {
+        console.warn("[vis-export] Failed to stop static entry server cleanly.", error);
+      }
+    }
+  }
+
+  if (lastError) {
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  throw new Error("Offline render failed to initialize a renderer");
+}
+
+interface LaunchAttempt {
+  description: string;
+  args: string[];
+  ignoreDefaultArgs?: string[];
+}
+
+function resolveLaunchAttempts(headless: HeadlessMode): LaunchAttempt[] {
+  const baseArgs = [
+    ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
+    "--autoplay-policy=no-user-gesture-required",
+    "--disable-dev-shm-usage",
+  ];
+
+  const gpuArgs = [
+    "--enable-gpu",
+    "--ignore-gpu-blocklist",
+    "--enable-webgl",
+    "--enable-webgl2",
+    "--enable-accelerated-2d-canvas",
+  ];
+
+  const gpuDefaultArgBlocklist = ["--disable-gpu", "--disable-software-rasterizer"];
+
+  return [
+    {
+      description: "ANGLE OpenGL",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=angle", "--use-angle=opengl"],
+      ignoreDefaultArgs: gpuDefaultArgBlocklist,
+    },
+    {
+      description: "SwiftShader",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=swiftshader", "--use-angle=swiftshader"],
+      ignoreDefaultArgs: gpuDefaultArgBlocklist,
+    },
+    {
+      description: "Software fallback",
+      args: [...baseArgs, "--disable-gpu", "--use-gl=swiftshader"],
+    },
+  ];
+}
+
+async function launchChromium(
+  attempt: LaunchAttempt,
+  headless: HeadlessMode,
+  protocolTimeout: number
+): Promise<Browser> {
+  return await withStep(`Launching Chromium (${attempt.description})`, () =>
+    puppeteer.launch({
+      headless,
+      protocolTimeout,
+      args: attempt.args,
+      ignoreDefaultArgs: attempt.ignoreDefaultArgs,
+    })
+  );
+}
+
+function shouldFallbackToPlaceholderFrames(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message ?? "";
+  if (extractMissingSharedLibraries(error).length > 0) {
+    return true;
+  }
+  if (/undefined symbol:/i.test(message)) {
+    return true;
+  }
+  if (/Inconsistency detected by ld\.so/i.test(message)) {
+    return true;
+  }
+  return false;
+}
+
+async function renderPlaceholderFrames(options: OfflineRendererOptions): Promise<FrameRenderResult[]> {
+  await mkdirp(options.outDir);
+  const { PNG } = await loadPngModule();
+  return await withStep(`Rendering ${options.totalFrames} placeholder frame(s)`, async () => {
+    const frames: FrameRenderResult[] = [];
+    if (options.totalFrames <= 0) {
+      return frames;
+    }
+
+    const primaryColor = (index: number) => (index * 97) & 0xff;
+    const png = new PNG({ width: options.width, height: options.height });
+    const red = primaryColor(1);
+    const green = primaryColor(2);
+    const blue = primaryColor(3);
+    for (let i = 0; i < png.data.length; i += 4) {
+      png.data[i] = red;
+      png.data[i + 1] = green;
+      png.data[i + 2] = blue;
+      png.data[i + 3] = 255;
+    }
+
+    const basePath = join(options.outDir, "frame-00000.png");
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      const stream = createWriteStream(basePath);
+      stream.on("finish", () => resolvePromise());
+      stream.on("error", (streamError) => rejectPromise(streamError));
+      png.pack().on("error", (packError) => rejectPromise(packError)).pipe(stream);
+    });
+    frames.push({ frame: 0, path: basePath });
+
+    for (let frame = 1; frame < options.totalFrames; frame++) {
+      const outPath = join(options.outDir, `frame-${frame.toString().padStart(5, "0")}.png`);
+      await copyFile(basePath, outPath);
+      frames.push({ frame, path: outPath });
+    }
+
+    return frames;
+  });
+}
+
+function annotateLaunchAttemptFailure(error: Error, attempt: LaunchAttempt, headless: HeadlessMode): Error {
+  const context = `Chromium launch profile "${attempt.description}" (headless=${describeHeadless(headless)})`;
+  if (!error.message.includes(context)) {
+    error.message = `${context}: ${error.message}`;
+  }
+  return error;
+}
+
+function isRendererAutoDetectError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return /Unable to auto-detect a suitable renderer/i.test(error.message);
+}
+
+async function renderWithLaunchProfile(
+  options: OfflineRendererOptions,
+  headless: HeadlessMode,
+  entryUrl: string,
+  attempt: LaunchAttempt
+): Promise<FrameRenderResult[]> {
+  let browser: Browser | null = null;
+  const protocolTimeout = resolveProtocolTimeout();
+  try {
+    browser = await launchChromium(attempt, headless, protocolTimeout);
 
     const page = await withStep("Opening new page", () => browser!.newPage());
     await withStep(
