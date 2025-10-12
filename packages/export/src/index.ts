@@ -267,6 +267,53 @@ async function renderWithHeadless(
   const launchAttempts = resolveLaunchAttempts(headless);
   let lastError: unknown = null;
 
+  throw new Error("Offline render failed to initialize a renderer");
+}
+
+interface LaunchAttempt {
+  description: string;
+  args: string[];
+}
+
+function resolveLaunchAttempts(headless: HeadlessMode): LaunchAttempt[] {
+  const baseArgs = [
+    ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
+    "--autoplay-policy=no-user-gesture-required",
+    "--disable-dev-shm-usage",
+  ];
+
+  const gpuArgs = ["--enable-gpu", "--ignore-gpu-blocklist"];
+
+  return [
+    {
+      description: "ANGLE OpenGL",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=angle", "--use-angle=opengl"],
+    },
+    {
+      description: "SwiftShader",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=swiftshader", "--use-angle=swiftshader"],
+    },
+    {
+      description: "Software fallback",
+      args: [...baseArgs, "--disable-gpu", "--use-gl=swiftshader"],
+    },
+  ];
+}
+
+function isRendererAutoDetectError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return /Unable to auto-detect a suitable renderer/i.test(error.message);
+}
+
+async function renderWithLaunchProfile(
+  options: OfflineRendererOptions,
+  headless: HeadlessMode,
+  entryUrl: string,
+  attempt: LaunchAttempt
+): Promise<FrameRenderResult[]> {
+  let browser: Browser | null = null;
   try {
     for (const attempt of launchAttempts) {
       try {
