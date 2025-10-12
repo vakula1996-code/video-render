@@ -104,6 +104,7 @@ export async function renderDeterministicFrames(options: OfflineRendererOptions)
         error instanceof Error &&
         (/Network\.enable timed out/i.test(error.message) ||
           /Page\.addScriptToEvaluateOnNewDocument timed out/i.test(error.message) ||
+          /Performance\.enable timed out/i.test(error.message) ||
           /Failed to launch the browser process/i.test(error.message));
       if (!hasNext || !isRecoverableShellError) {
         break;
