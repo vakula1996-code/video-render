@@ -214,8 +214,10 @@ export class VisEngine extends EventEmitter<VisEventMap> {
     const frame = Math.round((time / 1000) * this.loop.options.fps);
     const update = this.loop.clock.seek(frame);
     this.emit("engine:seek", { time });
+    this.emit("engine:update", update);
     this.scene?.update(update, this.buildSceneUtils(update));
     for (const plugin of this.plugins) {
+      plugin.update?.(update);
       if ("renderFrame" in plugin && typeof (plugin as RendererPlugin).renderFrame === "function") {
         await (plugin as RendererPlugin).renderFrame(time);
       }
