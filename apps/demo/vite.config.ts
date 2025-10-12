@@ -23,6 +23,7 @@ const visAliases = [
 
 export default defineConfig({
   root: "./",
+  base: "./",
   resolve: {
     alias: {
       ...visAliases,
