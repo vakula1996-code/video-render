@@ -9,7 +9,9 @@
     "build": "npm run build --workspaces",
     "render": "tsx packages/export/src/cli/render.ts",
     "export": "tsx packages/export/src/cli/export-video.ts",
-    "analyze": "tsx packages/audio/src/cli/analyze.ts"
+    "analyze": "tsx packages/audio/src/cli/analyze.ts",
+    "compare": "tsx packages/export/src/cli/compare-frames.ts",
+    "pipeline": "tsx packages/export/src/cli/pipeline.ts"
   },
   "workspaces": [
     "packages/*",
