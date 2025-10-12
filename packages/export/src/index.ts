@@ -196,54 +196,6 @@ export interface RenderAndEncodeResult {
  * Renders a deterministic PNG sequence by asking the page to render a specific frame.
  * The page must expose `window.__vis_renderFrame(timeMs)` for Puppeteer to call.
  */
-export async function renderDeterministicFrames(options: OfflineRendererOptions): Promise<FrameRenderResult[]> {
-  const normalizedOptions: OfflineRendererOptions = {
-    ...options,
-    entry: await ensureHtmlEntry(options.entry),
-  };
-
-  try {
-    const headlessPreferences = resolveHeadlessPreference();
-    let lastError: unknown;
-    for (const [index, headless] of headlessPreferences.entries()) {
-      try {
-        return await renderWithHeadless(normalizedOptions, headless);
-      } catch (error) {
-        const failure = error instanceof Error ? error : new Error(String(error));
-        lastError = failure;
-        if (shouldFallbackToPlaceholderFrames(failure)) {
-          throw failure;
-        }
-        const isShell = headless === "shell";
-        const hasNext = index < headlessPreferences.length - 1;
-        const recoverable = isShell && hasNext && isRecoverableShellError(failure);
-        const headlessLabel = describeHeadless(headless);
-        if (recoverable) {
-          console.warn(
-            `[vis-export] Offline render attempt with headless=${headlessLabel} failed but will retry with the next preference.`,
-            failure
-          );
-          continue;
-        }
-        console.error(`[vis-export] Offline render failed with headless=${headlessLabel}.`, failure);
-        break;
-      }
-      console.error(`[vis-export] Offline render failed with headless=${headlessLabel}.`, failure);
-      break;
-    }
-    throw lastError instanceof Error ? lastError : new Error("Offline render failed");
-  } catch (error) {
-    if (shouldFallbackToPlaceholderFrames(error)) {
-      console.warn(
-        "[vis-export] Falling back to placeholder frame rendering because Chromium dependencies are unavailable.",
-        error
-      );
-      return await renderPlaceholderFrames(normalizedOptions);
-    }
-    throw error;
-  }
-}
-
 type LaunchOptions = NonNullable<PuppeteerLaunchOptions>;
 type HeadlessMode = LaunchOptions["headless"];
 
@@ -302,13 +254,6 @@ async function renderWithHeadless(
   const launchProfiles = buildLaunchProfiles(headless);
   let lastError: unknown = null;
 
-async function renderWithLaunchProfile(
-  options: OfflineRendererOptions,
-  headless: HeadlessMode,
-  entryUrl: string,
-  attempt: LaunchAttempt
-): Promise<FrameRenderResult[]> {
-  let browser: Browser | null = null;
   try {
     for (const profile of launchProfiles) {
       try {
@@ -329,6 +274,119 @@ async function renderWithLaunchProfile(
         );
       }
     }
+
+    return frames;
+  });
+}
+
+function annotateLaunchProfileFailure(error: Error, profile: LaunchProfile, headless: HeadlessMode): Error {
+  const context = `Chromium launch profile "${profile.description}" (headless=${describeHeadless(headless)})`;
+  if (!error.message.includes(context)) {
+    error.message = `${context}: ${error.message}`;
+  }
+  return error;
+}
+
+function isRendererAutoDetectIssue(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return /Unable to auto-detect a suitable renderer/i.test(error.message);
+}
+
+async function renderWithProfile(
+  options: OfflineRendererOptions,
+  headless: HeadlessMode,
+  entryUrl: string,
+  profile: LaunchProfile
+): Promise<FrameRenderResult[]> {
+  let browser: Browser | null = null;
+  const protocolTimeout = resolveProtocolTimeout();
+  try {
+    browser = await launchChromium(profile, headless, protocolTimeout);
+
+    const page = await withStep("Opening new page", () => browser!.newPage());
+    await withStep(
+      `Configuring page viewport (${options.width}x${options.height}) and timeouts (${protocolTimeout}ms)`,
+      async () => {
+        await page.setViewport({ width: options.width, height: options.height, deviceScaleFactor: 1 });
+        page.setDefaultTimeout(protocolTimeout);
+        page.setDefaultNavigationTimeout(protocolTimeout);
+      }
+    );
+
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+
+    page.on("console", (message: ConsoleMessage) => {
+      const text = message.text();
+      const type = message.type();
+      const formatted = `[vis-export][console:${type}] ${text}`;
+      if (type === "error") {
+        consoleErrors.push(formatted);
+        console.error(formatted);
+      } else {
+        console.log(formatted);
+      }
+    });
+
+    page.on("pageerror", (error: unknown) => {
+      const formatted = `[vis-export][pageerror] ${error instanceof Error ? error.stack ?? error.message : String(error)}`;
+      pageErrors.push(formatted);
+      console.error(formatted);
+    });
+
+    page.on("requestfailed", (request: HTTPRequest) => {
+      const failure = request.failure();
+      const formatted = `[vis-export][requestfailed] ${request.url()} ${failure ? `→ ${failure.errorText}` : ""}`.trim();
+      console.warn(formatted);
+    });
+
+    await withStep(`Navigating to ${entryUrl}`, () => page.goto(entryUrl, { waitUntil: "networkidle0" }));
+    await withStep("Waiting for offline renderer readiness", async () => {
+      try {
+        await page.waitForFunction(
+          () => {
+            const bridge = window as unknown as {
+              __vis_ready?: boolean;
+              __vis_renderFrame?: unknown;
+            };
+            return bridge.__vis_ready || typeof bridge.__vis_renderFrame === "function";
+          },
+          { timeout: protocolTimeout }
+        );
+      } catch (error) {
+        if (consoleErrors.length > 0 || pageErrors.length > 0) {
+          const diagnostics = [...pageErrors, ...consoleErrors].join("\n");
+          throw new Error(`Failed to detect offline render readiness. Browser console reported:\n${diagnostics}`);
+        }
+        throw error;
+      }
+    });
+
+    const results = await withStep(`Rendering ${options.totalFrames} frame(s)`, async () => {
+      const frames: FrameRenderResult[] = [];
+      for (let frame = 0; frame < options.totalFrames; frame++) {
+        if (
+          frame === 0 ||
+          frame === options.totalFrames - 1 ||
+          options.totalFrames <= 10 ||
+          frame % Math.max(1, Math.floor(options.totalFrames / 10)) === 0
+        ) {
+          console.log(`[vis-export] Rendering frame ${frame + 1}/${options.totalFrames}`);
+        }
+        const time = (frame / options.fps) * 1000;
+        await page.evaluate((ms: number) => {
+          return (window as unknown as { __vis_renderFrame?: (ms: number) => Promise<void> }).__vis_renderFrame?.(ms);
+        }, time);
+        const outPath = join(options.outDir, `frame-${frame.toString().padStart(5, "0")}.png`);
+        await page.screenshot({ path: outPath });
+        frames.push({ frame, path: outPath });
+      }
+      return frames;
+    });
+
+    return results;
   } finally {
     if (staticServer) {
       try {
@@ -578,22 +636,6 @@ async function renderWithProfile(
   }
 }
 
-export async function runRenderAndEncode(options: RenderAndEncodeOptions): Promise<RenderAndEncodeResult> {
-  await ensureOutDir(options.outDir);
-  const frames = await renderDeterministicFrames(options);
-  const framePattern =
-    options.framePattern ?? inferFramePattern(frames, options.outDir) ?? join(options.outDir, "frame-%05d.png");
-  const videoFile = options.videoFile ?? join(options.outDir, "output.mp4");
-  await encodeVideo({
-    inputPattern: framePattern,
-    outputFile: videoFile,
-    fps: options.fps,
-    codec: options.codec,
-    pixelFormat: options.pixelFormat,
-  });
-  return { frames, videoFile, framePattern };
-}
-
 export interface ExportVideoOptions {
   inputPattern: string;
   outputFile: string;
@@ -605,33 +647,281 @@ export interface ExportVideoOptions {
 /**
  * Wraps ffmpeg invocation to build perfect mp4/prores loops from PNG sequences.
  */
-export async function encodeVideo(options: ExportVideoOptions): Promise<void> {
-  const binaryPath = ffmpegStatic;
-  if (binaryPath == null) {
-    throw new Error("ffmpeg-static binary not found");
+async function ensureHtmlEntry(entry: string): Promise<string> {
+  if (/^https?:\/\//i.test(entry)) {
+    return entry;
   }
+
+  const resolvedEntry = resolve(entry);
+  if (await pathExists(resolvedEntry)) {
+    return resolvedEntry;
+  }
+
+  const distDir = dirname(resolvedEntry);
+  const workspaceDir = dirname(distDir);
+  const packageJsonPath = join(workspaceDir, "package.json");
+
+  if (!(await pathExists(packageJsonPath))) {
+    throw new Error(
+      `Entry HTML not found at ${resolvedEntry}. Provide an accessible URL or build the project containing this entry point.`
+    );
+  }
+
+  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf-8")) as {
+    name?: string;
+    scripts?: Record<string, string>;
+  };
+
+  if (!packageJson.scripts?.build) {
+    throw new Error(
+      `Entry HTML not found at ${resolvedEntry} and workspace ${workspaceDir} has no build script. Add a build script or provide a prebuilt entry.`
+    );
+  }
+
+  const workspaceName = typeof packageJson.name === "string" ? packageJson.name : undefined;
+  const npmExecutable = process.platform === "win32" ? "npm.cmd" : "npm";
+  const buildArgs = workspaceName ? ["run", "build", "--workspace", workspaceName] : ["run", "build"];
+  const spawnOptions: SpawnOptionsWithoutStdio = workspaceName ? {} : { cwd: workspaceDir };
+
+  console.log(
+    `[vis-export] Entry ${resolvedEntry} is missing. Running ${npmExecutable} ${buildArgs.join(" ")} to build the workspace.`
+  );
+
+  await runCommand(npmExecutable, buildArgs, spawnOptions);
+
+  if (!(await pathExists(resolvedEntry))) {
+    throw new Error(
+      `Entry HTML still not found at ${resolvedEntry} after running the build. Ensure the build outputs the expected file.`
+    );
+  }
+
+  return resolvedEntry;
+}
+
+interface StaticServerHandle {
+  url: string;
+  close(): Promise<void>;
+}
+
+async function createStaticEntryServer(entryPath: string): Promise<StaticServerHandle> {
+  const resolvedEntry = resolve(entryPath);
+  const rootDir = dirname(resolvedEntry);
+  const rootDirResolved = resolve(rootDir);
+  const rootDirWithSep = rootDirResolved.endsWith(sep) ? rootDirResolved : `${rootDirResolved}${sep}`;
+
+  const server = createServer((request, response) => {
+    const method = request.method ?? "GET";
+    if (method !== "GET" && method !== "HEAD") {
+      response.statusCode = 405;
+      response.end("Method Not Allowed");
+      return;
+    }
+
+    const requestedUrl = new URL(request.url ?? "/", "http://localhost");
+    const sanitized = sanitizePathname(requestedUrl.pathname);
+    if (sanitized == null) {
+      response.statusCode = 403;
+      response.end("Forbidden");
+      return;
+    }
+
+    void (async () => {
+      const visited = new Set<string>();
+      let attemptSanitized = sanitized;
+
+      while (true) {
+        if (visited.has(attemptSanitized)) {
+          break;
+        }
+        visited.add(attemptSanitized);
+
+        const candidatePath =
+          attemptSanitized.length === 0 ? resolvedEntry : resolve(rootDirResolved, attemptSanitized);
+        const normalizedCandidate = resolve(candidatePath);
+        const isWithinRoot =
+          normalizedCandidate === rootDirResolved ||
+          normalizedCandidate.startsWith(rootDirWithSep) ||
+          normalizedCandidate === resolvedEntry;
+        if (!isWithinRoot) {
+          response.statusCode = 403;
+          response.end("Forbidden");
+          return;
+        }
+
+        try {
+          let filePath = attemptSanitized.length === 0 ? resolvedEntry : normalizedCandidate;
+          let fileStat = await stat(filePath);
+          if (fileStat.isDirectory()) {
+            filePath = join(filePath, "index.html");
+            fileStat = await stat(filePath);
+          }
+
+          const contentType = getContentType(filePath);
+          response.statusCode = 200;
+          response.setHeader("Content-Type", contentType);
+          response.setHeader("Content-Length", fileStat.size);
+
+          if (method === "HEAD") {
+            response.end();
+            return;
+          }
+
+          const stream = createReadStream(filePath);
+          stream.on("error", (streamError) => {
+            console.error(`[vis-export][static-server] Failed to stream ${filePath}`, streamError);
+            if (!response.headersSent) {
+              response.statusCode = 500;
+              response.end("Failed to read file");
+            } else {
+              response.destroy(streamError as Error);
+            }
+          });
+          stream.pipe(response);
+          return;
+        } catch (error) {
+          const err = error as NodeJS.ErrnoException;
+          const message = err instanceof Error ? err.message : String(error);
+          if (err?.code === "ENOENT") {
+            const stripped = stripLineAndColumnSuffix(attemptSanitized);
+            if (stripped !== attemptSanitized) {
+              attemptSanitized = stripped;
+              continue;
+            }
+          }
+          console.warn(`[vis-export][static-server] ${attemptSanitized || "/"} → ${message}`);
+          if (!response.headersSent) {
+            response.statusCode = attemptSanitized.length === 0 ? 500 : 404;
+            response.end("Not Found");
+          } else {
+            response.end();
+          }
+          return;
+        }
+      }
+
+      if (!response.headersSent) {
+        response.statusCode = sanitized.length === 0 ? 500 : 404;
+        response.end("Not Found");
+      }
+    })();
+  });
+
   await new Promise<void>((resolvePromise, rejectPromise) => {
-    ffmpeg()
-      .setFfmpegPath(binaryPath)
-      .input(options.inputPattern)
-      .inputOptions(["-framerate", options.fps.toString()])
-      .videoCodec(options.codec ?? "libx264")
-      .outputOptions([
-        "-pix_fmt",
-        options.pixelFormat ?? "yuv420p",
-        "-y",
-      ])
-      .output(options.outputFile)
-      .on("end", () => resolvePromise())
-      .on("error", (error: Error) => rejectPromise(error))
-      .run();
+    const handleError = (error: Error) => {
+      server.removeListener("listening", handleListening);
+      rejectPromise(error);
+    };
+    const handleListening = () => {
+      server.removeListener("error", handleError);
+      resolvePromise();
+    };
+    server.once("error", handleError);
+    server.once("listening", handleListening);
+    server.listen(0, "127.0.0.1");
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await closeServer(server);
+    throw new Error("Failed to determine static server address");
+  }
+
+  const origin = `http://127.0.0.1:${address.port}`;
+  const entryUrl = `${origin}/`;
+  console.log(`[vis-export] Serving ${resolvedEntry} via ${entryUrl}`);
+
+  return {
+    url: entryUrl,
+    close: () => closeServer(server),
+  };
+}
+
+function sanitizePathname(pathname: string): string | null {
+  const segments = pathname.split("/");
+  const safeSegments: string[] = [];
+  for (const segment of segments) {
+    if (!segment || segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      return null;
+    }
+    safeSegments.push(segment);
+  }
+  return safeSegments.join("/");
+}
+
+function stripLineAndColumnSuffix(pathname: string): string {
+  if (!pathname) {
+    return pathname;
+  }
+  const segments = pathname.split("/");
+  if (segments.length === 0) {
+    return pathname;
+  }
+  const last = segments[segments.length - 1];
+  const match = /^(.*?)(:\d+){1,2}$/.exec(last);
+  if (match && match[1]) {
+    segments[segments.length - 1] = match[1];
+    return segments.join("/");
+  }
+  return pathname;
+}
+
+const MIME_TYPES: Record<string, string> = {
+  ".css": "text/css",
+  ".html": "text/html",
+  ".js": "application/javascript",
+  ".json": "application/json",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain",
+  ".wasm": "application/wasm",
+  ".webm": "video/webm",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+function getContentType(path: string): string {
+  const ext = extname(path).toLowerCase();
+  if (ext in MIME_TYPES) {
+    return MIME_TYPES[ext];
+  }
+  if (ext === ".mjs") {
+    return "application/javascript";
+  }
+  if (ext === ".json5") {
+    return "application/json";
+  }
+  return "application/octet-stream";
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    server.close((error) => {
+      if (error) {
+        rejectPromise(error);
+      } else {
+        resolvePromise();
+      }
+    });
   });
 }
 
-export async function ensureOutDir(path: string): Promise<void> {
-  if (!(await pathExists(path))) {
-    await mkdirp(path);
-  }
+async function runCommand(command: string, args: string[], options: SpawnOptionsWithoutStdio = {}): Promise<void> {
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, { stdio: "inherit", ...options });
+    child.on("error", (error) => rejectPromise(error));
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolvePromise();
+      } else {
+        rejectPromise(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
+      }
+    });
+  });
 }
 
 async function ensureHtmlEntry(entry: string): Promise<string> {
@@ -935,6 +1225,180 @@ export interface RegressionSummary {
   missingInBaseline: string[];
 }
 
+export interface ReleaseManifestOptions {
+  frames: FrameRenderResult[];
+  videoFile: string;
+  fps: number;
+  durationMs: number;
+  seed: string;
+  outputPath: string;
+  plugins?: string[];
+  extra?: Record<string, unknown>;
+}
+
+export interface ReleaseManifest {
+  version: string;
+  generatedAt: string;
+  fps: number;
+  durationMs: number;
+  totalFrames: number;
+  seed: string;
+  video: {
+    path: string;
+    hash: string;
+    size: number;
+  };
+  frames: {
+    frame: number;
+    path: string;
+    hash: string;
+    size: number;
+  }[];
+  plugins?: string[];
+  extra?: Record<string, unknown>;
+}
+
+async function collectPngs(dir: string): Promise<string[]> {
+  const files = await readdir(dir);
+  return files
+    .filter((file) => file.toLowerCase().endsWith(".png"))
+    .sort();
+}
+
+async function readPng(path: string, PngConstructor: PngCtor): Promise<PngInstance> {
+  return await new Promise<PngInstance>((resolve, reject) => {
+    createReadStream(path)
+      .pipe(new PngConstructor())
+      .on("parsed", function (this: PngInstance) {
+        resolve(this);
+      })
+      .on("error", reject);
+  });
+}
+
+async function writePng(png: PngInstance, path: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    png
+      .pack()
+      .pipe(createWriteStream(path))
+      .on("finish", resolve)
+      .on("error", reject);
+  });
+}
+
+function inferFramePattern(frames: FrameRenderResult[], outDir: string): string | undefined {
+  const first = frames[0];
+  if (!first) return undefined;
+  const basename = first.path.startsWith(outDir) ? first.path.slice(outDir.length + 1) : relative(outDir, first.path);
+  const match = basename.match(/^(.*?)(\d+)(\.png)$/);
+  if (!match) return undefined;
+  const [, prefix, digits, suffix] = match;
+  return join(outDir, `${prefix}%0${digits.length}d${suffix}`);
+}
+
+async function computeFileHash(path: string, algorithm: string = "sha256"): Promise<string> {
+  const hash = createHash(algorithm);
+  return await new Promise<string>((resolve, reject) => {
+    createReadStream(path)
+      .on("data", (chunk) => hash.update(chunk))
+      .on("error", reject)
+      .on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+export async function ensureOutDir(path: string): Promise<void> {
+  if (!(await pathExists(path))) {
+    await mkdirp(path);
+  }
+}
+
+export async function renderDeterministicFrames(options: OfflineRendererOptions): Promise<FrameRenderResult[]> {
+  const normalizedOptions: OfflineRendererOptions = {
+    ...options,
+    entry: await ensureHtmlEntry(options.entry),
+  };
+
+  try {
+    const headlessPreferences = resolveHeadlessPreference();
+    let lastError: unknown;
+    for (const [index, headless] of headlessPreferences.entries()) {
+      try {
+        return await renderWithHeadless(normalizedOptions, headless);
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        lastError = failure;
+        if (shouldFallbackToPlaceholderFrames(failure)) {
+          throw failure;
+        }
+        const isShell = headless === "shell";
+        const hasNext = index < headlessPreferences.length - 1;
+        const recoverable = isShell && hasNext && isRecoverableShellError(failure);
+        if (recoverable) {
+          console.warn(
+            `[vis-export] Offline render attempt with headless=${describeHeadless(headless)} failed but will retry with the next preference.`,
+            failure
+          );
+          continue;
+        }
+        console.error(
+          `[vis-export] Offline render failed with headless=${describeHeadless(headless)}.`,
+          failure
+        );
+        break;
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("Offline render failed");
+  } catch (error) {
+    if (shouldFallbackToPlaceholderFrames(error)) {
+      console.warn(
+        "[vis-export] Falling back to placeholder frame rendering because Chromium dependencies are unavailable.",
+        error
+      );
+      return await renderPlaceholderFrames(normalizedOptions);
+    }
+    throw error;
+  }
+}
+
+export async function runRenderAndEncode(options: RenderAndEncodeOptions): Promise<RenderAndEncodeResult> {
+  await ensureOutDir(options.outDir);
+  const frames = await renderDeterministicFrames(options);
+  const framePattern =
+    options.framePattern ?? inferFramePattern(frames, options.outDir) ?? join(options.outDir, "frame-%05d.png");
+  const videoFile = options.videoFile ?? join(options.outDir, "output.mp4");
+  await encodeVideo({
+    inputPattern: framePattern,
+    outputFile: videoFile,
+    fps: options.fps,
+    codec: options.codec,
+    pixelFormat: options.pixelFormat,
+  });
+  return { frames, videoFile, framePattern };
+}
+
+export async function encodeVideo(options: ExportVideoOptions): Promise<void> {
+  const binaryPath = ffmpegStatic;
+  if (binaryPath == null) {
+    throw new Error("ffmpeg-static binary not found");
+  }
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    ffmpeg()
+      .setFfmpegPath(binaryPath)
+      .input(options.inputPattern)
+      .inputOptions(["-framerate", options.fps.toString()])
+      .videoCodec(options.codec ?? "libx264")
+      .outputOptions([
+        "-pix_fmt",
+        options.pixelFormat ?? "yuv420p",
+        "-y",
+      ])
+      .output(options.outputFile)
+      .on("end", () => resolvePromise())
+      .on("error", (error: Error) => rejectPromise(error))
+      .run();
+  });
+}
+
 export async function compareFrameSequences(options: CompareFrameSequencesOptions): Promise<RegressionSummary> {
   const [{ PNG }, pixelmatchFn] = await Promise.all([loadPngModule(), loadPixelmatch()]);
   const [actualFiles, baselineFiles] = await Promise.all([
@@ -995,39 +1459,6 @@ export async function compareFrameSequences(options: CompareFrameSequencesOption
   return { diffs, totalCompared, maxMismatch, averageMismatch, missingInActual, missingInBaseline };
 }
 
-export interface ReleaseManifestOptions {
-  frames: FrameRenderResult[];
-  videoFile: string;
-  fps: number;
-  durationMs: number;
-  seed: string;
-  outputPath: string;
-  plugins?: string[];
-  extra?: Record<string, unknown>;
-}
-
-export interface ReleaseManifest {
-  version: string;
-  generatedAt: string;
-  fps: number;
-  durationMs: number;
-  totalFrames: number;
-  seed: string;
-  video: {
-    path: string;
-    hash: string;
-    size: number;
-  };
-  frames: {
-    frame: number;
-    path: string;
-    hash: string;
-    size: number;
-  }[];
-  plugins?: string[];
-  extra?: Record<string, unknown>;
-}
-
 export async function writeReleaseManifest(options: ReleaseManifestOptions): Promise<ReleaseManifest> {
   await ensureOutDir(dirname(options.outputPath));
   const manifestDir = dirname(options.outputPath);
@@ -1061,52 +1492,4 @@ export async function writeReleaseManifest(options: ReleaseManifestOptions): Pro
   };
   await writeFile(options.outputPath, JSON.stringify(manifest, null, 2), "utf-8");
   return manifest;
-}
-
-async function collectPngs(dir: string): Promise<string[]> {
-  const files = await readdir(dir);
-  return files
-    .filter((file) => file.toLowerCase().endsWith(".png"))
-    .sort();
-}
-
-async function readPng(path: string, PngConstructor: PngCtor): Promise<PngInstance> {
-  return await new Promise<PngInstance>((resolve, reject) => {
-    createReadStream(path)
-      .pipe(new PngConstructor())
-      .on("parsed", function (this: PngInstance) {
-        resolve(this);
-      })
-      .on("error", reject);
-  });
-}
-
-async function writePng(png: PngInstance, path: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    png
-      .pack()
-      .pipe(createWriteStream(path))
-      .on("finish", resolve)
-      .on("error", reject);
-  });
-}
-
-function inferFramePattern(frames: FrameRenderResult[], outDir: string): string | undefined {
-  const first = frames[0];
-  if (!first) return undefined;
-  const basename = first.path.startsWith(outDir) ? first.path.slice(outDir.length + 1) : relative(outDir, first.path);
-  const match = basename.match(/^(.*?)(\d+)(\.png)$/);
-  if (!match) return undefined;
-  const [, prefix, digits, suffix] = match;
-  return join(outDir, `${prefix}%0${digits.length}d${suffix}`);
-}
-
-async function computeFileHash(path: string, algorithm: string = "sha256"): Promise<string> {
-  const hash = createHash(algorithm);
-  return await new Promise<string>((resolve, reject) => {
-    createReadStream(path)
-      .on("data", (chunk) => hash.update(chunk))
-      .on("error", reject)
-      .on("end", () => resolve(hash.digest("hex")));
-  });
 }
