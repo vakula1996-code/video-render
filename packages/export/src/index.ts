@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { createReadStream, createWriteStream } from "fs";
 import { mkdirp, pathExists } from "fs-extra";
-import { readdir, stat, writeFile, mkdir } from "fs/promises";
+import { readdir, stat, writeFile, mkdir, readFile } from "fs/promises";
 import { join, resolve, relative, dirname } from "path";
 import { pathToFileURL } from "url";
 import { PNG } from "pngjs";
@@ -12,6 +12,7 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegStatic from "ffmpeg-static";
 import type { Buffer } from "buffer";
 import type { Duplex } from "stream";
+import { spawn, type SpawnOptionsWithoutStdio } from "child_process";
 
 interface PngOptions {
   width?: number;
@@ -90,11 +91,15 @@ export interface RenderAndEncodeResult {
  * The page must expose `window.__vis_renderFrame(timeMs)` for Puppeteer to call.
  */
 export async function renderDeterministicFrames(options: OfflineRendererOptions): Promise<FrameRenderResult[]> {
+  const normalizedOptions: OfflineRendererOptions = {
+    ...options,
+    entry: await ensureHtmlEntry(options.entry),
+  };
   const headlessPreferences = resolveHeadlessPreference();
   let lastError: unknown;
   for (const [index, headless] of headlessPreferences.entries()) {
     try {
-      return await renderWithHeadless(options, headless);
+      return await renderWithHeadless(normalizedOptions, headless);
     } catch (error) {
       lastError = error;
       const isShell = headless === "shell";
@@ -241,6 +246,71 @@ export async function ensureOutDir(path: string): Promise<void> {
   if (!(await pathExists(path))) {
     await mkdirp(path);
   }
+}
+
+async function ensureHtmlEntry(entry: string): Promise<string> {
+  if (/^https?:\/\//i.test(entry)) {
+    return entry;
+  }
+
+  const resolvedEntry = resolve(entry);
+  if (await pathExists(resolvedEntry)) {
+    return resolvedEntry;
+  }
+
+  const distDir = dirname(resolvedEntry);
+  const workspaceDir = dirname(distDir);
+  const packageJsonPath = join(workspaceDir, "package.json");
+
+  if (!(await pathExists(packageJsonPath))) {
+    throw new Error(
+      `Entry HTML not found at ${resolvedEntry}. Provide an accessible URL or build the project containing this entry point.`
+    );
+  }
+
+  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf-8")) as {
+    name?: string;
+    scripts?: Record<string, string>;
+  };
+
+  if (!packageJson.scripts?.build) {
+    throw new Error(
+      `Entry HTML not found at ${resolvedEntry} and workspace ${workspaceDir} has no build script. Add a build script or provide a prebuilt entry.`
+    );
+  }
+
+  const workspaceName = typeof packageJson.name === "string" ? packageJson.name : undefined;
+  const npmExecutable = process.platform === "win32" ? "npm.cmd" : "npm";
+  const buildArgs = workspaceName ? ["run", "build", "--workspace", workspaceName] : ["run", "build"];
+  const spawnOptions: SpawnOptionsWithoutStdio = workspaceName ? {} : { cwd: workspaceDir };
+
+  console.log(
+    `[vis-export] Entry ${resolvedEntry} is missing. Running ${npmExecutable} ${buildArgs.join(" ")} to build the workspace.`
+  );
+
+  await runCommand(npmExecutable, buildArgs, spawnOptions);
+
+  if (!(await pathExists(resolvedEntry))) {
+    throw new Error(
+      `Entry HTML still not found at ${resolvedEntry} after running the build. Ensure the build outputs the expected file.`
+    );
+  }
+
+  return resolvedEntry;
+}
+
+async function runCommand(command: string, args: string[], options: SpawnOptionsWithoutStdio = {}): Promise<void> {
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, { stdio: "inherit", ...options });
+    child.on("error", (error) => rejectPromise(error));
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolvePromise();
+      } else {
+        rejectPromise(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
+      }
+    });
+  });
 }
 
 export interface CompareFrameSequencesOptions {
