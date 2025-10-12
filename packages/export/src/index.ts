@@ -228,6 +228,8 @@ export async function renderDeterministicFrames(options: OfflineRendererOptions)
         console.error(`[vis-export] Offline render failed with headless=${headlessLabel}.`, failure);
         break;
       }
+      console.error(`[vis-export] Offline render failed with headless=${headlessLabel}.`, failure);
+      break;
     }
     throw lastError instanceof Error ? lastError : new Error("Offline render failed");
   } catch (error) {
@@ -300,6 +302,13 @@ async function renderWithHeadless(
   const launchProfiles = buildLaunchProfiles(headless);
   let lastError: unknown = null;
 
+async function renderWithLaunchProfile(
+  options: OfflineRendererOptions,
+  headless: HeadlessMode,
+  entryUrl: string,
+  attempt: LaunchAttempt
+): Promise<FrameRenderResult[]> {
+  let browser: Browser | null = null;
   try {
     for (const profile of launchProfiles) {
       try {
