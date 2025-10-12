@@ -4,6 +4,8 @@ import { mkdirp, pathExists } from "fs-extra";
 import { readdir, stat, writeFile, mkdir } from "fs/promises";
 import { join, resolve, relative, dirname } from "path";
 import { pathToFileURL } from "url";
+import { PNG } from "pngjs";
+import pixelmatch from "pixelmatch";
 import puppeteer from "puppeteer";
 import type { PuppeteerLaunchOptions } from "puppeteer";
 import ffmpeg from "fluent-ffmpeg";
