@@ -1,17 +1,19 @@
 import { createHash } from "crypto";
 import { createReadStream, createWriteStream } from "fs";
 import { mkdirp, pathExists } from "fs-extra";
-import { readdir, stat, writeFile, mkdir } from "fs/promises";
-import { join, resolve, relative, dirname } from "path";
+import { readdir, stat, writeFile, mkdir, readFile } from "fs/promises";
+import { join, resolve, relative, dirname, extname, sep } from "path";
+import { createServer, type Server } from "http";
 import { pathToFileURL } from "url";
 import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
 import puppeteer from "puppeteer";
-import type { PuppeteerLaunchOptions } from "puppeteer";
+import type { PuppeteerLaunchOptions, Browser, ConsoleMessage, HTTPRequest } from "puppeteer";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegStatic from "ffmpeg-static";
 import type { Buffer } from "buffer";
 import type { Duplex } from "stream";
+import { spawn, type SpawnOptionsWithoutStdio } from "child_process";
 
 interface PngOptions {
   width?: number;
@@ -58,6 +60,93 @@ async function loadPixelmatch(): Promise<PixelmatchFn> {
   return pixelmatchPromise;
 }
 
+const DEFAULT_PROTOCOL_TIMEOUT_MS = 120_000;
+let cachedProtocolTimeout: number | null = null;
+let warnedProtocolTimeout = false;
+
+function resolveProtocolTimeout(): number {
+  if (cachedProtocolTimeout != null) {
+    return cachedProtocolTimeout;
+  }
+  const raw = process.env.VIS_PROTOCOL_TIMEOUT;
+  if (raw) {
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isNaN(parsed) && parsed > 0) {
+      cachedProtocolTimeout = parsed;
+      return parsed;
+    }
+    if (!warnedProtocolTimeout) {
+      console.warn(
+        `[vis-export] VIS_PROTOCOL_TIMEOUT must be a positive integer. Received "${raw}". Falling back to ${DEFAULT_PROTOCOL_TIMEOUT_MS}ms.`
+      );
+      warnedProtocolTimeout = true;
+    }
+  }
+  cachedProtocolTimeout = DEFAULT_PROTOCOL_TIMEOUT_MS;
+  return cachedProtocolTimeout;
+}
+
+function formatDurationMs(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) {
+    return "?";
+  }
+  if (durationMs < 1) {
+    return `${durationMs.toFixed(2)}ms`;
+  }
+  if (durationMs < 1_000) {
+    return `${durationMs.toFixed(0)}ms`;
+  }
+  if (durationMs < 60_000) {
+    const seconds = durationMs / 1_000;
+    return seconds < 10 ? `${seconds.toFixed(2)}s` : `${seconds.toFixed(1)}s`;
+  }
+  const minutes = durationMs / 60_000;
+  return `${minutes.toFixed(2)}m`;
+}
+
+function appendProtocolTimeoutHint(error: Error): void {
+  if (
+    /(Log\.enable timed out|Network\.enable timed out|Performance\.enable timed out|Page\.addScriptToEvaluateOnNewDocument timed out)/i.test(
+      error.message
+    )
+  ) {
+    const timeout = resolveProtocolTimeout();
+    const hint = `Hint: Increase VIS_PROTOCOL_TIMEOUT (currently ${timeout}ms) or ensure Chromium can initialize within that window.`;
+    if (!error.message.includes("VIS_PROTOCOL_TIMEOUT")) {
+      error.message = `${error.message}\n${hint}`;
+    }
+  }
+}
+
+function enrichError(error: unknown, label: string): Error {
+  if (error instanceof Error) {
+    if (!error.message.startsWith(`[${label}]`)) {
+      error.message = `[${label}] ${error.message}`;
+    }
+    appendProtocolTimeoutHint(error);
+    return error;
+  }
+  const enriched = new Error(`[${label}] ${String(error)}`);
+  appendProtocolTimeoutHint(enriched);
+  return enriched;
+}
+
+async function withStep<T>(label: string, action: () => Promise<T>): Promise<T> {
+  const start = process.hrtime.bigint();
+  console.log(`[vis-export] ▶ ${label}`);
+  try {
+    const result = await action();
+    const elapsed = Number(process.hrtime.bigint() - start) / 1_000_000;
+    console.log(`[vis-export] ✅ ${label} (${formatDurationMs(elapsed)})`);
+    return result;
+  } catch (error) {
+    const elapsed = Number(process.hrtime.bigint() - start) / 1_000_000;
+    const enriched = enrichError(error, label);
+    console.error(`[vis-export] ❌ ${label} (${formatDurationMs(elapsed)})`, enriched);
+    throw enriched;
+  }
+}
+
 export interface OfflineRendererOptions {
   entry: string;
   outDir: string;
@@ -90,25 +179,31 @@ export interface RenderAndEncodeResult {
  * The page must expose `window.__vis_renderFrame(timeMs)` for Puppeteer to call.
  */
 export async function renderDeterministicFrames(options: OfflineRendererOptions): Promise<FrameRenderResult[]> {
+  const normalizedOptions: OfflineRendererOptions = {
+    ...options,
+    entry: await ensureHtmlEntry(options.entry),
+  };
   const headlessPreferences = resolveHeadlessPreference();
   let lastError: unknown;
   for (const [index, headless] of headlessPreferences.entries()) {
     try {
-      return await renderWithHeadless(options, headless);
+      return await renderWithHeadless(normalizedOptions, headless);
     } catch (error) {
-      lastError = error;
+      const failure = error instanceof Error ? error : new Error(String(error));
+      lastError = failure;
       const isShell = headless === "shell";
       const hasNext = index < headlessPreferences.length - 1;
-      const isRecoverableShellError =
-        isShell &&
-        error instanceof Error &&
-        (/Network\.enable timed out/i.test(error.message) ||
-          /Page\.addScriptToEvaluateOnNewDocument timed out/i.test(error.message) ||
-          /Performance\.enable timed out/i.test(error.message) ||
-          /Failed to launch the browser process/i.test(error.message));
-      if (!hasNext || !isRecoverableShellError) {
-        break;
+      const recoverable = isShell && hasNext && isRecoverableShellError(failure);
+      const headlessLabel = describeHeadless(headless);
+      if (recoverable) {
+        console.warn(
+          `[vis-export] Offline render attempt with headless=${headlessLabel} failed but will retry with the next preference.`,
+          failure
+        );
+        continue;
       }
+      console.error(`[vis-export] Offline render failed with headless=${headlessLabel}.`, failure);
+      break;
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Offline render failed");
@@ -131,60 +226,249 @@ function resolveHeadlessPreference(): HeadlessMode[] {
   return process.platform === "win32" ? [true, "shell"] : ["shell", true];
 }
 
+function describeHeadless(headless: HeadlessMode): string {
+  if (headless == null) {
+    return "unspecified";
+  }
+  if (headless === true) {
+    return "true";
+  }
+  if (headless === false) {
+    return "false";
+  }
+  return headless;
+}
+
+function isRecoverableShellError(error: Error): boolean {
+  return (
+    /Network\.enable timed out/i.test(error.message) ||
+    /Page\.addScriptToEvaluateOnNewDocument timed out/i.test(error.message) ||
+    /Performance\.enable timed out/i.test(error.message) ||
+    /Failed to launch the browser process/i.test(error.message) ||
+    /Log\.enable timed out/i.test(error.message)
+  );
+}
+
 async function renderWithHeadless(
   options: OfflineRendererOptions,
   headless: HeadlessMode
 ): Promise<FrameRenderResult[]> {
-  const results: FrameRenderResult[] = [];
   await mkdirp(options.outDir);
-  const browser = await puppeteer.launch({
-    headless,
-    protocolTimeout: 120_000,
-    args: [
-      ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
-      "--enable-gpu",
-      "--ignore-gpu-blocklist",
-      "--use-gl=angle",
-      "--use-angle=opengl",
-      "--disable-software-rasterizer",
-      "--disable-dev-shm-usage",
-    ],
-  });
+  const isRemoteEntry = /^https?:\/\//i.test(options.entry);
+  const staticServer = isRemoteEntry
+    ? null
+    : await withStep("Starting static entry server", () => createStaticEntryServer(options.entry));
+  const entryUrl = staticServer
+    ? staticServer.url
+    : options.entry.startsWith("http")
+    ? options.entry
+    : pathToFileURL(resolve(options.entry)).toString();
+
+  const launchAttempts = resolveLaunchAttempts(headless);
+  let lastError: unknown = null;
 
   try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: options.width, height: options.height, deviceScaleFactor: 1 });
-    page.setDefaultTimeout(120_000);
-    page.setDefaultNavigationTimeout(120_000);
-
-    const url = options.entry.startsWith("http")
-      ? options.entry
-      : pathToFileURL(resolve(options.entry)).toString();
-    await page.goto(url, { waitUntil: "networkidle0" });
-    await page.waitForFunction(
-      () => {
-        const bridge = window as unknown as {
-          __vis_ready?: boolean;
-          __vis_renderFrame?: unknown;
-        };
-        return bridge.__vis_ready || typeof bridge.__vis_renderFrame === "function";
-      },
-      { timeout: 120_000 }
-    );
-
-    for (let frame = 0; frame < options.totalFrames; frame++) {
-      const time = (frame / options.fps) * 1000;
-      await page.evaluate((ms) => {
-        return (window as unknown as { __vis_renderFrame?: (ms: number) => Promise<void> }).__vis_renderFrame?.(ms);
-      }, time);
-      const outPath = join(options.outDir, `frame-${frame.toString().padStart(5, "0")}.png`);
-      await page.screenshot({ path: outPath });
-      results.push({ frame, path: outPath });
+    for (const attempt of launchAttempts) {
+      try {
+        return await renderWithLaunchProfile(options, headless, entryUrl, attempt);
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        const annotated = annotateLaunchAttemptFailure(failure, attempt, headless);
+        lastError = annotated;
+        if (!isRendererAutoDetectError(annotated)) {
+          throw annotated;
+        }
+        if (attempt === launchAttempts[launchAttempts.length - 1]) {
+          throw annotated;
+        }
+        console.warn(
+          `[vis-export] Renderer auto-detection failed using ${attempt.description}. Retrying with next launch profile.`,
+          annotated
+        );
+      }
     }
   } finally {
-    await browser.close();
+    if (staticServer) {
+      try {
+        await withStep("Stopping static entry server", () => staticServer.close());
+      } catch (error) {
+        console.warn("[vis-export] Failed to stop static entry server cleanly.", error);
+      }
+    }
   }
-  return results;
+
+  if (lastError) {
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  throw new Error("Offline render failed to initialize a renderer");
+}
+
+interface LaunchAttempt {
+  description: string;
+  args: string[];
+  ignoreDefaultArgs?: string[];
+}
+
+function resolveLaunchAttempts(headless: HeadlessMode): LaunchAttempt[] {
+  const baseArgs = [
+    ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
+    "--autoplay-policy=no-user-gesture-required",
+    "--disable-dev-shm-usage",
+  ];
+
+  const gpuArgs = [
+    "--enable-gpu",
+    "--ignore-gpu-blocklist",
+    "--enable-webgl",
+    "--enable-webgl2",
+    "--enable-accelerated-2d-canvas",
+  ];
+
+  const gpuDefaultArgBlocklist = ["--disable-gpu", "--disable-software-rasterizer"];
+
+  return [
+    {
+      description: "ANGLE OpenGL",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=angle", "--use-angle=opengl"],
+      ignoreDefaultArgs: gpuDefaultArgBlocklist,
+    },
+    {
+      description: "SwiftShader",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=swiftshader", "--use-angle=swiftshader"],
+      ignoreDefaultArgs: gpuDefaultArgBlocklist,
+    },
+    {
+      description: "Software fallback",
+      args: [...baseArgs, "--disable-gpu", "--use-gl=swiftshader"],
+    },
+  ];
+}
+
+function annotateLaunchAttemptFailure(error: Error, attempt: LaunchAttempt, headless: HeadlessMode): Error {
+  const context = `Chromium launch profile "${attempt.description}" (headless=${describeHeadless(headless)})`;
+  if (!error.message.includes(context)) {
+    error.message = `${context}: ${error.message}`;
+  }
+  return error;
+}
+
+function isRendererAutoDetectError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return /Unable to auto-detect a suitable renderer/i.test(error.message);
+}
+
+async function renderWithLaunchProfile(
+  options: OfflineRendererOptions,
+  headless: HeadlessMode,
+  entryUrl: string,
+  attempt: LaunchAttempt
+): Promise<FrameRenderResult[]> {
+  let browser: Browser | null = null;
+  const protocolTimeout = resolveProtocolTimeout();
+  try {
+    browser = await withStep(`Launching Chromium (${attempt.description})`, () =>
+      puppeteer.launch({
+        headless,
+        protocolTimeout,
+        args: attempt.args,
+        ignoreDefaultArgs: attempt.ignoreDefaultArgs,
+      })
+    );
+
+    const page = await withStep("Opening new page", () => browser!.newPage());
+    await withStep(
+      `Configuring page viewport (${options.width}x${options.height}) and timeouts (${protocolTimeout}ms)`,
+      async () => {
+        await page.setViewport({ width: options.width, height: options.height, deviceScaleFactor: 1 });
+        page.setDefaultTimeout(protocolTimeout);
+        page.setDefaultNavigationTimeout(protocolTimeout);
+      }
+    );
+
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+
+    page.on("console", (message: ConsoleMessage) => {
+      const text = message.text();
+      const type = message.type();
+      const formatted = `[vis-export][console:${type}] ${text}`;
+      if (type === "error") {
+        consoleErrors.push(formatted);
+        console.error(formatted);
+      } else {
+        console.log(formatted);
+      }
+    });
+
+    page.on("pageerror", (error: unknown) => {
+      const formatted = `[vis-export][pageerror] ${error instanceof Error ? error.stack ?? error.message : String(error)}`;
+      pageErrors.push(formatted);
+      console.error(formatted);
+    });
+
+    page.on("requestfailed", (request: HTTPRequest) => {
+      const failure = request.failure();
+      const formatted = `[vis-export][requestfailed] ${request.url()} ${failure ? `→ ${failure.errorText}` : ""}`.trim();
+      console.warn(formatted);
+    });
+
+    await withStep(`Navigating to ${entryUrl}`, () => page.goto(entryUrl, { waitUntil: "networkidle0" }));
+    await withStep("Waiting for offline renderer readiness", async () => {
+      try {
+        await page.waitForFunction(
+          () => {
+            const bridge = window as unknown as {
+              __vis_ready?: boolean;
+              __vis_renderFrame?: unknown;
+            };
+            return bridge.__vis_ready || typeof bridge.__vis_renderFrame === "function";
+          },
+          { timeout: protocolTimeout }
+        );
+      } catch (error) {
+        if (consoleErrors.length > 0 || pageErrors.length > 0) {
+          const diagnostics = [...pageErrors, ...consoleErrors].join("\n");
+          throw new Error(`Failed to detect offline render readiness. Browser console reported:\n${diagnostics}`);
+        }
+        throw error;
+      }
+    });
+
+    const results = await withStep(`Rendering ${options.totalFrames} frame(s)`, async () => {
+      const frames: FrameRenderResult[] = [];
+      for (let frame = 0; frame < options.totalFrames; frame++) {
+        if (
+          frame === 0 ||
+          frame === options.totalFrames - 1 ||
+          options.totalFrames <= 10 ||
+          frame % Math.max(1, Math.floor(options.totalFrames / 10)) === 0
+        ) {
+          console.log(`[vis-export] Rendering frame ${frame + 1}/${options.totalFrames}`);
+        }
+        const time = (frame / options.fps) * 1000;
+        await page.evaluate((ms: number) => {
+          return (window as unknown as { __vis_renderFrame?: (ms: number) => Promise<void> }).__vis_renderFrame?.(ms);
+        }, time);
+        const outPath = join(options.outDir, `frame-${frame.toString().padStart(5, "0")}.png`);
+        await page.screenshot({ path: outPath });
+        frames.push({ frame, path: outPath });
+      }
+      return frames;
+    });
+
+    return results;
+  } finally {
+    if (browser) {
+      try {
+        await withStep("Closing Chromium", () => browser!.close());
+      } catch (error) {
+        console.warn("[vis-export] Failed to close Chromium cleanly.", error);
+      }
+    }
+  }
 }
 
 export async function runRenderAndEncode(options: RenderAndEncodeOptions): Promise<RenderAndEncodeResult> {
@@ -241,6 +525,283 @@ export async function ensureOutDir(path: string): Promise<void> {
   if (!(await pathExists(path))) {
     await mkdirp(path);
   }
+}
+
+async function ensureHtmlEntry(entry: string): Promise<string> {
+  if (/^https?:\/\//i.test(entry)) {
+    return entry;
+  }
+
+  const resolvedEntry = resolve(entry);
+  if (await pathExists(resolvedEntry)) {
+    return resolvedEntry;
+  }
+
+  const distDir = dirname(resolvedEntry);
+  const workspaceDir = dirname(distDir);
+  const packageJsonPath = join(workspaceDir, "package.json");
+
+  if (!(await pathExists(packageJsonPath))) {
+    throw new Error(
+      `Entry HTML not found at ${resolvedEntry}. Provide an accessible URL or build the project containing this entry point.`
+    );
+  }
+
+  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf-8")) as {
+    name?: string;
+    scripts?: Record<string, string>;
+  };
+
+  if (!packageJson.scripts?.build) {
+    throw new Error(
+      `Entry HTML not found at ${resolvedEntry} and workspace ${workspaceDir} has no build script. Add a build script or provide a prebuilt entry.`
+    );
+  }
+
+  const workspaceName = typeof packageJson.name === "string" ? packageJson.name : undefined;
+  const npmExecutable = process.platform === "win32" ? "npm.cmd" : "npm";
+  const buildArgs = workspaceName ? ["run", "build", "--workspace", workspaceName] : ["run", "build"];
+  const spawnOptions: SpawnOptionsWithoutStdio = workspaceName ? {} : { cwd: workspaceDir };
+
+  console.log(
+    `[vis-export] Entry ${resolvedEntry} is missing. Running ${npmExecutable} ${buildArgs.join(" ")} to build the workspace.`
+  );
+
+  await runCommand(npmExecutable, buildArgs, spawnOptions);
+
+  if (!(await pathExists(resolvedEntry))) {
+    throw new Error(
+      `Entry HTML still not found at ${resolvedEntry} after running the build. Ensure the build outputs the expected file.`
+    );
+  }
+
+  return resolvedEntry;
+}
+
+interface StaticServerHandle {
+  url: string;
+  close(): Promise<void>;
+}
+
+async function createStaticEntryServer(entryPath: string): Promise<StaticServerHandle> {
+  const resolvedEntry = resolve(entryPath);
+  const rootDir = dirname(resolvedEntry);
+  const rootDirResolved = resolve(rootDir);
+  const rootDirWithSep = rootDirResolved.endsWith(sep) ? rootDirResolved : `${rootDirResolved}${sep}`;
+
+  const server = createServer((request, response) => {
+    const method = request.method ?? "GET";
+    if (method !== "GET" && method !== "HEAD") {
+      response.statusCode = 405;
+      response.end("Method Not Allowed");
+      return;
+    }
+
+    const requestedUrl = new URL(request.url ?? "/", "http://localhost");
+    const sanitized = sanitizePathname(requestedUrl.pathname);
+    if (sanitized == null) {
+      response.statusCode = 403;
+      response.end("Forbidden");
+      return;
+    }
+
+    void (async () => {
+      const visited = new Set<string>();
+      let attemptSanitized = sanitized;
+
+      while (true) {
+        if (visited.has(attemptSanitized)) {
+          break;
+        }
+        visited.add(attemptSanitized);
+
+        const candidatePath =
+          attemptSanitized.length === 0 ? resolvedEntry : resolve(rootDirResolved, attemptSanitized);
+        const normalizedCandidate = resolve(candidatePath);
+        const isWithinRoot =
+          normalizedCandidate === rootDirResolved ||
+          normalizedCandidate.startsWith(rootDirWithSep) ||
+          normalizedCandidate === resolvedEntry;
+        if (!isWithinRoot) {
+          response.statusCode = 403;
+          response.end("Forbidden");
+          return;
+        }
+
+        try {
+          let filePath = attemptSanitized.length === 0 ? resolvedEntry : normalizedCandidate;
+          let fileStat = await stat(filePath);
+          if (fileStat.isDirectory()) {
+            filePath = join(filePath, "index.html");
+            fileStat = await stat(filePath);
+          }
+
+          const contentType = getContentType(filePath);
+          response.statusCode = 200;
+          response.setHeader("Content-Type", contentType);
+          response.setHeader("Content-Length", fileStat.size);
+
+          if (method === "HEAD") {
+            response.end();
+            return;
+          }
+
+          const stream = createReadStream(filePath);
+          stream.on("error", (streamError) => {
+            console.error(`[vis-export][static-server] Failed to stream ${filePath}`, streamError);
+            if (!response.headersSent) {
+              response.statusCode = 500;
+              response.end("Failed to read file");
+            } else {
+              response.destroy(streamError as Error);
+            }
+          });
+          stream.pipe(response);
+          return;
+        } catch (error) {
+          const err = error as NodeJS.ErrnoException;
+          const message = err instanceof Error ? err.message : String(error);
+          if (err?.code === "ENOENT") {
+            const stripped = stripLineAndColumnSuffix(attemptSanitized);
+            if (stripped !== attemptSanitized) {
+              attemptSanitized = stripped;
+              continue;
+            }
+          }
+          console.warn(`[vis-export][static-server] ${attemptSanitized || "/"} → ${message}`);
+          if (!response.headersSent) {
+            response.statusCode = attemptSanitized.length === 0 ? 500 : 404;
+            response.end("Not Found");
+          } else {
+            response.end();
+          }
+          return;
+        }
+      }
+
+      if (!response.headersSent) {
+        response.statusCode = sanitized.length === 0 ? 500 : 404;
+        response.end("Not Found");
+      }
+    })();
+  });
+
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const handleError = (error: Error) => {
+      server.removeListener("listening", handleListening);
+      rejectPromise(error);
+    };
+    const handleListening = () => {
+      server.removeListener("error", handleError);
+      resolvePromise();
+    };
+    server.once("error", handleError);
+    server.once("listening", handleListening);
+    server.listen(0, "127.0.0.1");
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await closeServer(server);
+    throw new Error("Failed to determine static server address");
+  }
+
+  const origin = `http://127.0.0.1:${address.port}`;
+  const entryUrl = `${origin}/`;
+  console.log(`[vis-export] Serving ${resolvedEntry} via ${entryUrl}`);
+
+  return {
+    url: entryUrl,
+    close: () => closeServer(server),
+  };
+}
+
+function sanitizePathname(pathname: string): string | null {
+  const segments = pathname.split("/");
+  const safeSegments: string[] = [];
+  for (const segment of segments) {
+    if (!segment || segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      return null;
+    }
+    safeSegments.push(segment);
+  }
+  return safeSegments.join("/");
+}
+
+function stripLineAndColumnSuffix(pathname: string): string {
+  if (!pathname) {
+    return pathname;
+  }
+  const segments = pathname.split("/");
+  if (segments.length === 0) {
+    return pathname;
+  }
+  const last = segments[segments.length - 1];
+  const match = /^(.*?)(:\d+){1,2}$/.exec(last);
+  if (match && match[1]) {
+    segments[segments.length - 1] = match[1];
+    return segments.join("/");
+  }
+  return pathname;
+}
+
+const MIME_TYPES: Record<string, string> = {
+  ".css": "text/css",
+  ".html": "text/html",
+  ".js": "application/javascript",
+  ".json": "application/json",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain",
+  ".wasm": "application/wasm",
+  ".webm": "video/webm",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+function getContentType(path: string): string {
+  const ext = extname(path).toLowerCase();
+  if (ext in MIME_TYPES) {
+    return MIME_TYPES[ext];
+  }
+  if (ext === ".mjs") {
+    return "application/javascript";
+  }
+  if (ext === ".json5") {
+    return "application/json";
+  }
+  return "application/octet-stream";
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    server.close((error) => {
+      if (error) {
+        rejectPromise(error);
+      } else {
+        resolvePromise();
+      }
+    });
+  });
+}
+
+async function runCommand(command: string, args: string[], options: SpawnOptionsWithoutStdio = {}): Promise<void> {
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, { stdio: "inherit", ...options });
+    child.on("error", (error) => rejectPromise(error));
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolvePromise();
+      } else {
+        rejectPromise(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
+      }
+    });
+  });
 }
 
 export interface CompareFrameSequencesOptions {
