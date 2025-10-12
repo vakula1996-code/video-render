@@ -7,6 +7,7 @@ import { pathToFileURL } from "url";
 import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
 import puppeteer from "puppeteer";
+import type { PuppeteerLaunchOptions } from "puppeteer";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegStatic from "ffmpeg-static";
 import type { Buffer } from "buffer";
@@ -89,13 +90,56 @@ export interface RenderAndEncodeResult {
  * The page must expose `window.__vis_renderFrame(timeMs)` for Puppeteer to call.
  */
 export async function renderDeterministicFrames(options: OfflineRendererOptions): Promise<FrameRenderResult[]> {
+  const headlessPreferences = resolveHeadlessPreference();
+  let lastError: unknown;
+  for (const [index, headless] of headlessPreferences.entries()) {
+    try {
+      return await renderWithHeadless(options, headless);
+    } catch (error) {
+      lastError = error;
+      const isShell = headless === "shell";
+      const hasNext = index < headlessPreferences.length - 1;
+      const isRecoverableShellError =
+        isShell &&
+        error instanceof Error &&
+        (/Network\.enable timed out/i.test(error.message) ||
+          /Failed to launch the browser process/i.test(error.message));
+      if (!hasNext || !isRecoverableShellError) {
+        break;
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Offline render failed");
+}
+
+type LaunchOptions = NonNullable<PuppeteerLaunchOptions>;
+type HeadlessMode = LaunchOptions["headless"];
+
+function resolveHeadlessPreference(): HeadlessMode[] {
+  const env = process.env.VIS_HEADLESS?.toLowerCase();
+  if (env === "shell") {
+    return ["shell"];
+  }
+  if (env === "new" || env === "true") {
+    return [true];
+  }
+  if (env === "false") {
+    return [false];
+  }
+  return process.platform === "win32" ? [true, "shell"] : ["shell", true];
+}
+
+async function renderWithHeadless(
+  options: OfflineRendererOptions,
+  headless: HeadlessMode
+): Promise<FrameRenderResult[]> {
   const results: FrameRenderResult[] = [];
   await mkdirp(options.outDir);
   const browser = await puppeteer.launch({
-    headless: "shell",
+    headless,
     protocolTimeout: 120_000,
     args: [
-      "--headless=new",
+      ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
       "--enable-gpu",
       "--ignore-gpu-blocklist",
       "--use-gl=angle",
