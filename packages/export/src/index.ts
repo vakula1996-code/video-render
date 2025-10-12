@@ -141,29 +141,96 @@ async function renderWithHeadless(
   options: OfflineRendererOptions,
   headless: HeadlessMode
 ): Promise<FrameRenderResult[]> {
-  const results: FrameRenderResult[] = [];
   await mkdirp(options.outDir);
   const isRemoteEntry = /^https?:\/\//i.test(options.entry);
   const staticServer = isRemoteEntry ? null : await createStaticEntryServer(options.entry);
+  const entryUrl = staticServer
+    ? staticServer.url
+    : options.entry.startsWith("http")
+    ? options.entry
+    : pathToFileURL(resolve(options.entry)).toString();
+
+  const launchAttempts = resolveLaunchAttempts(headless);
+  let lastError: unknown = null;
+
+  try {
+    for (const attempt of launchAttempts) {
+      try {
+        return await renderWithLaunchProfile(options, headless, entryUrl, attempt);
+      } catch (error) {
+        lastError = error;
+        if (!isRendererAutoDetectError(error)) {
+          throw error;
+        }
+        if (attempt === launchAttempts[launchAttempts.length - 1]) {
+          throw error;
+        }
+        console.warn(
+          `[vis-export] Renderer auto-detection failed using ${attempt.description}. Retrying with next launch profile.`
+        );
+      }
+    }
+  } finally {
+    await staticServer?.close();
+  }
+
+  if (lastError) {
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  throw new Error("Offline render failed to initialize a renderer");
+}
+
+interface LaunchAttempt {
+  description: string;
+  args: string[];
+}
+
+function resolveLaunchAttempts(headless: HeadlessMode): LaunchAttempt[] {
+  const baseArgs = [
+    ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
+    "--autoplay-policy=no-user-gesture-required",
+    "--disable-dev-shm-usage",
+  ];
+
+  const gpuArgs = ["--enable-gpu", "--ignore-gpu-blocklist"];
+
+  return [
+    {
+      description: "ANGLE OpenGL",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=angle", "--use-angle=opengl"],
+    },
+    {
+      description: "SwiftShader",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=swiftshader", "--use-angle=swiftshader"],
+    },
+    {
+      description: "Software fallback",
+      args: [...baseArgs, "--disable-gpu", "--use-gl=swiftshader"],
+    },
+  ];
+}
+
+function isRendererAutoDetectError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return /Unable to auto-detect a suitable renderer/i.test(error.message);
+}
+
+async function renderWithLaunchProfile(
+  options: OfflineRendererOptions,
+  headless: HeadlessMode,
+  entryUrl: string,
+  attempt: LaunchAttempt
+): Promise<FrameRenderResult[]> {
   let browser: Browser | null = null;
   try {
     browser = await puppeteer.launch({
-    headless,
-    protocolTimeout: 120_000,
-    args: [
-      ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
-      "--enable-gpu",
-      "--ignore-gpu-blocklist",
-      "--use-gl=angle",
-      "--use-angle=opengl",
-      "--disable-software-rasterizer",
-      "--disable-dev-shm-usage",
-    ],
+      headless,
+      protocolTimeout: 120_000,
+      args: attempt.args,
     });
-
-    const entryUrl = staticServer ? staticServer.url : options.entry.startsWith("http")
-      ? options.entry
-      : pathToFileURL(resolve(options.entry)).toString();
 
     const page = await browser.newPage();
     await page.setViewport({ width: options.width, height: options.height, deviceScaleFactor: 1 });
@@ -217,6 +284,7 @@ async function renderWithHeadless(
       throw error;
     }
 
+    const results: FrameRenderResult[] = [];
     for (let frame = 0; frame < options.totalFrames; frame++) {
       const time = (frame / options.fps) * 1000;
       await page.evaluate((ms: number) => {
@@ -226,13 +294,13 @@ async function renderWithHeadless(
       await page.screenshot({ path: outPath });
       results.push({ frame, path: outPath });
     }
+
+    return results;
   } finally {
     if (browser) {
       await browser.close();
     }
-    await staticServer?.close();
   }
-  return results;
 }
 
 export async function runRenderAndEncode(options: RenderAndEncodeOptions): Promise<RenderAndEncodeResult> {
