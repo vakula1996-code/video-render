@@ -160,7 +160,13 @@ async function renderWithHeadless(
       : pathToFileURL(resolve(options.entry)).toString();
     await page.goto(url, { waitUntil: "networkidle0" });
     await page.waitForFunction(
-      () => Boolean((window as unknown as { __vis_ready?: boolean }).__vis_ready),
+      () => {
+        const bridge = window as unknown as {
+          __vis_ready?: boolean;
+          __vis_renderFrame?: unknown;
+        };
+        return bridge.__vis_ready || typeof bridge.__vis_renderFrame === "function";
+      },
       { timeout: 120_000 }
     );
 
