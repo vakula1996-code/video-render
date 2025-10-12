@@ -2,12 +2,13 @@ import { createHash } from "crypto";
 import { createReadStream, createWriteStream } from "fs";
 import { mkdirp, pathExists } from "fs-extra";
 import { readdir, stat, writeFile, mkdir, readFile } from "fs/promises";
-import { join, resolve, relative, dirname } from "path";
+import { join, resolve, relative, dirname, extname, sep } from "path";
+import { createServer, type Server } from "http";
 import { pathToFileURL } from "url";
 import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
 import puppeteer from "puppeteer";
-import type { PuppeteerLaunchOptions } from "puppeteer";
+import type { PuppeteerLaunchOptions, Browser, ConsoleMessage, HTTPRequest } from "puppeteer";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegStatic from "ffmpeg-static";
 import type { Buffer } from "buffer";
@@ -142,7 +143,11 @@ async function renderWithHeadless(
 ): Promise<FrameRenderResult[]> {
   const results: FrameRenderResult[] = [];
   await mkdirp(options.outDir);
-  const browser = await puppeteer.launch({
+  const isRemoteEntry = /^https?:\/\//i.test(options.entry);
+  const staticServer = isRemoteEntry ? null : await createStaticEntryServer(options.entry);
+  let browser: Browser | null = null;
+  try {
+    browser = await puppeteer.launch({
     headless,
     protocolTimeout: 120_000,
     args: [
@@ -154,32 +159,67 @@ async function renderWithHeadless(
       "--disable-software-rasterizer",
       "--disable-dev-shm-usage",
     ],
-  });
+    });
 
-  try {
+    const entryUrl = staticServer ? staticServer.url : options.entry.startsWith("http")
+      ? options.entry
+      : pathToFileURL(resolve(options.entry)).toString();
+
     const page = await browser.newPage();
     await page.setViewport({ width: options.width, height: options.height, deviceScaleFactor: 1 });
     page.setDefaultTimeout(120_000);
     page.setDefaultNavigationTimeout(120_000);
 
-    const url = options.entry.startsWith("http")
-      ? options.entry
-      : pathToFileURL(resolve(options.entry)).toString();
-    await page.goto(url, { waitUntil: "networkidle0" });
-    await page.waitForFunction(
-      () => {
-        const bridge = window as unknown as {
-          __vis_ready?: boolean;
-          __vis_renderFrame?: unknown;
-        };
-        return bridge.__vis_ready || typeof bridge.__vis_renderFrame === "function";
-      },
-      { timeout: 120_000 }
-    );
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+
+    page.on("console", (message: ConsoleMessage) => {
+      const text = message.text();
+      const type = message.type();
+      const formatted = `[vis-export][console:${type}] ${text}`;
+      if (type === "error") {
+        consoleErrors.push(formatted);
+        console.error(formatted);
+      } else {
+        console.log(formatted);
+      }
+    });
+
+    page.on("pageerror", (error: unknown) => {
+      const formatted = `[vis-export][pageerror] ${error instanceof Error ? error.stack ?? error.message : String(error)}`;
+      pageErrors.push(formatted);
+      console.error(formatted);
+    });
+
+    page.on("requestfailed", (request: HTTPRequest) => {
+      const failure = request.failure();
+      const formatted = `[vis-export][requestfailed] ${request.url()} ${failure ? `→ ${failure.errorText}` : ""}`.trim();
+      console.warn(formatted);
+    });
+
+    await page.goto(entryUrl, { waitUntil: "networkidle0" });
+    try {
+      await page.waitForFunction(
+        () => {
+          const bridge = window as unknown as {
+            __vis_ready?: boolean;
+            __vis_renderFrame?: unknown;
+          };
+          return bridge.__vis_ready || typeof bridge.__vis_renderFrame === "function";
+        },
+        { timeout: 120_000 }
+      );
+    } catch (error) {
+      if (consoleErrors.length > 0 || pageErrors.length > 0) {
+        const diagnostics = [...pageErrors, ...consoleErrors].join("\n");
+        throw new Error(`Failed to detect offline render readiness. Browser console reported:\n${diagnostics}`);
+      }
+      throw error;
+    }
 
     for (let frame = 0; frame < options.totalFrames; frame++) {
       const time = (frame / options.fps) * 1000;
-      await page.evaluate((ms) => {
+      await page.evaluate((ms: number) => {
         return (window as unknown as { __vis_renderFrame?: (ms: number) => Promise<void> }).__vis_renderFrame?.(ms);
       }, time);
       const outPath = join(options.outDir, `frame-${frame.toString().padStart(5, "0")}.png`);
@@ -187,7 +227,10 @@ async function renderWithHeadless(
       results.push({ frame, path: outPath });
     }
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close();
+    }
+    await staticServer?.close();
   }
   return results;
 }
@@ -297,6 +340,171 @@ async function ensureHtmlEntry(entry: string): Promise<string> {
   }
 
   return resolvedEntry;
+}
+
+interface StaticServerHandle {
+  url: string;
+  close(): Promise<void>;
+}
+
+async function createStaticEntryServer(entryPath: string): Promise<StaticServerHandle> {
+  const resolvedEntry = resolve(entryPath);
+  const rootDir = dirname(resolvedEntry);
+  const rootDirResolved = resolve(rootDir);
+  const rootDirWithSep = rootDirResolved.endsWith(sep) ? rootDirResolved : `${rootDirResolved}${sep}`;
+
+  const server = createServer((request, response) => {
+    const method = request.method ?? "GET";
+    if (method !== "GET" && method !== "HEAD") {
+      response.statusCode = 405;
+      response.end("Method Not Allowed");
+      return;
+    }
+
+    const requestedUrl = new URL(request.url ?? "/", "http://localhost");
+    const sanitized = sanitizePathname(requestedUrl.pathname);
+    if (sanitized == null) {
+      response.statusCode = 403;
+      response.end("Forbidden");
+      return;
+    }
+
+    const candidatePath = sanitized.length === 0 ? resolvedEntry : resolve(rootDirResolved, sanitized);
+    const normalizedCandidate = resolve(candidatePath);
+    const isWithinRoot =
+      normalizedCandidate === rootDirResolved || normalizedCandidate.startsWith(rootDirWithSep) || normalizedCandidate === resolvedEntry;
+    if (!isWithinRoot) {
+      response.statusCode = 403;
+      response.end("Forbidden");
+      return;
+    }
+
+    void (async () => {
+      try {
+        let filePath = sanitized.length === 0 ? resolvedEntry : normalizedCandidate;
+        let fileStat = await stat(filePath);
+        if (fileStat.isDirectory()) {
+          filePath = join(filePath, "index.html");
+          fileStat = await stat(filePath);
+        }
+
+        const contentType = getContentType(filePath);
+        response.statusCode = 200;
+        response.setHeader("Content-Type", contentType);
+        response.setHeader("Content-Length", fileStat.size);
+
+        if (method === "HEAD") {
+          response.end();
+          return;
+        }
+
+        const stream = createReadStream(filePath);
+        stream.on("error", (error) => {
+          console.error(`[vis-export][static-server] Failed to stream ${filePath}`, error);
+          if (!response.headersSent) {
+            response.statusCode = 500;
+            response.end("Failed to read file");
+          } else {
+            response.destroy(error as Error);
+          }
+        });
+        stream.pipe(response);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[vis-export][static-server] ${sanitized || "/"} → ${message}`);
+        if (!response.headersSent) {
+          response.statusCode = sanitized.length === 0 ? 500 : 404;
+        }
+        response.end("Not Found");
+      }
+    })();
+  });
+
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const handleError = (error: Error) => {
+      server.removeListener("listening", handleListening);
+      rejectPromise(error);
+    };
+    const handleListening = () => {
+      server.removeListener("error", handleError);
+      resolvePromise();
+    };
+    server.once("error", handleError);
+    server.once("listening", handleListening);
+    server.listen(0, "127.0.0.1");
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await closeServer(server);
+    throw new Error("Failed to determine static server address");
+  }
+
+  const origin = `http://127.0.0.1:${address.port}`;
+  const entryUrl = `${origin}/`;
+  console.log(`[vis-export] Serving ${resolvedEntry} via ${entryUrl}`);
+
+  return {
+    url: entryUrl,
+    close: () => closeServer(server),
+  };
+}
+
+function sanitizePathname(pathname: string): string | null {
+  const segments = pathname.split("/");
+  const safeSegments: string[] = [];
+  for (const segment of segments) {
+    if (!segment || segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      return null;
+    }
+    safeSegments.push(segment);
+  }
+  return safeSegments.join("/");
+}
+
+const MIME_TYPES: Record<string, string> = {
+  ".css": "text/css",
+  ".html": "text/html",
+  ".js": "application/javascript",
+  ".json": "application/json",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain",
+  ".wasm": "application/wasm",
+  ".webm": "video/webm",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+function getContentType(path: string): string {
+  const ext = extname(path).toLowerCase();
+  if (ext in MIME_TYPES) {
+    return MIME_TYPES[ext];
+  }
+  if (ext === ".mjs") {
+    return "application/javascript";
+  }
+  if (ext === ".json5") {
+    return "application/json";
+  }
+  return "application/octet-stream";
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    server.close((error) => {
+      if (error) {
+        rejectPromise(error);
+      } else {
+        resolvePromise();
+      }
+    });
+  });
 }
 
 async function runCommand(command: string, args: string[], options: SpawnOptionsWithoutStdio = {}): Promise<void> {
