@@ -60,6 +60,93 @@ async function loadPixelmatch(): Promise<PixelmatchFn> {
   return pixelmatchPromise;
 }
 
+const DEFAULT_PROTOCOL_TIMEOUT_MS = 120_000;
+let cachedProtocolTimeout: number | null = null;
+let warnedProtocolTimeout = false;
+
+function resolveProtocolTimeout(): number {
+  if (cachedProtocolTimeout != null) {
+    return cachedProtocolTimeout;
+  }
+  const raw = process.env.VIS_PROTOCOL_TIMEOUT;
+  if (raw) {
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isNaN(parsed) && parsed > 0) {
+      cachedProtocolTimeout = parsed;
+      return parsed;
+    }
+    if (!warnedProtocolTimeout) {
+      console.warn(
+        `[vis-export] VIS_PROTOCOL_TIMEOUT must be a positive integer. Received "${raw}". Falling back to ${DEFAULT_PROTOCOL_TIMEOUT_MS}ms.`
+      );
+      warnedProtocolTimeout = true;
+    }
+  }
+  cachedProtocolTimeout = DEFAULT_PROTOCOL_TIMEOUT_MS;
+  return cachedProtocolTimeout;
+}
+
+function formatDurationMs(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) {
+    return "?";
+  }
+  if (durationMs < 1) {
+    return `${durationMs.toFixed(2)}ms`;
+  }
+  if (durationMs < 1_000) {
+    return `${durationMs.toFixed(0)}ms`;
+  }
+  if (durationMs < 60_000) {
+    const seconds = durationMs / 1_000;
+    return seconds < 10 ? `${seconds.toFixed(2)}s` : `${seconds.toFixed(1)}s`;
+  }
+  const minutes = durationMs / 60_000;
+  return `${minutes.toFixed(2)}m`;
+}
+
+function appendProtocolTimeoutHint(error: Error): void {
+  if (
+    /(Log\.enable timed out|Network\.enable timed out|Performance\.enable timed out|Page\.addScriptToEvaluateOnNewDocument timed out)/i.test(
+      error.message
+    )
+  ) {
+    const timeout = resolveProtocolTimeout();
+    const hint = `Hint: Increase VIS_PROTOCOL_TIMEOUT (currently ${timeout}ms) or ensure Chromium can initialize within that window.`;
+    if (!error.message.includes("VIS_PROTOCOL_TIMEOUT")) {
+      error.message = `${error.message}\n${hint}`;
+    }
+  }
+}
+
+function enrichError(error: unknown, label: string): Error {
+  if (error instanceof Error) {
+    if (!error.message.startsWith(`[${label}]`)) {
+      error.message = `[${label}] ${error.message}`;
+    }
+    appendProtocolTimeoutHint(error);
+    return error;
+  }
+  const enriched = new Error(`[${label}] ${String(error)}`);
+  appendProtocolTimeoutHint(enriched);
+  return enriched;
+}
+
+async function withStep<T>(label: string, action: () => Promise<T>): Promise<T> {
+  const start = process.hrtime.bigint();
+  console.log(`[vis-export] ▶ ${label}`);
+  try {
+    const result = await action();
+    const elapsed = Number(process.hrtime.bigint() - start) / 1_000_000;
+    console.log(`[vis-export] ✅ ${label} (${formatDurationMs(elapsed)})`);
+    return result;
+  } catch (error) {
+    const elapsed = Number(process.hrtime.bigint() - start) / 1_000_000;
+    const enriched = enrichError(error, label);
+    console.error(`[vis-export] ❌ ${label} (${formatDurationMs(elapsed)})`, enriched);
+    throw enriched;
+  }
+}
+
 export interface OfflineRendererOptions {
   entry: string;
   outDir: string;
@@ -102,19 +189,21 @@ export async function renderDeterministicFrames(options: OfflineRendererOptions)
     try {
       return await renderWithHeadless(normalizedOptions, headless);
     } catch (error) {
-      lastError = error;
+      const failure = error instanceof Error ? error : new Error(String(error));
+      lastError = failure;
       const isShell = headless === "shell";
       const hasNext = index < headlessPreferences.length - 1;
-      const isRecoverableShellError =
-        isShell &&
-        error instanceof Error &&
-        (/Network\.enable timed out/i.test(error.message) ||
-          /Page\.addScriptToEvaluateOnNewDocument timed out/i.test(error.message) ||
-          /Performance\.enable timed out/i.test(error.message) ||
-          /Failed to launch the browser process/i.test(error.message));
-      if (!hasNext || !isRecoverableShellError) {
-        break;
+      const recoverable = isShell && hasNext && isRecoverableShellError(failure);
+      const headlessLabel = describeHeadless(headless);
+      if (recoverable) {
+        console.warn(
+          `[vis-export] Offline render attempt with headless=${headlessLabel} failed but will retry with the next preference.`,
+          failure
+        );
+        continue;
       }
+      console.error(`[vis-export] Offline render failed with headless=${headlessLabel}.`, failure);
+      break;
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Offline render failed");
@@ -137,13 +226,38 @@ function resolveHeadlessPreference(): HeadlessMode[] {
   return process.platform === "win32" ? [true, "shell"] : ["shell", true];
 }
 
+function describeHeadless(headless: HeadlessMode): string {
+  if (headless == null) {
+    return "unspecified";
+  }
+  if (headless === true) {
+    return "true";
+  }
+  if (headless === false) {
+    return "false";
+  }
+  return headless;
+}
+
+function isRecoverableShellError(error: Error): boolean {
+  return (
+    /Network\.enable timed out/i.test(error.message) ||
+    /Page\.addScriptToEvaluateOnNewDocument timed out/i.test(error.message) ||
+    /Performance\.enable timed out/i.test(error.message) ||
+    /Failed to launch the browser process/i.test(error.message) ||
+    /Log\.enable timed out/i.test(error.message)
+  );
+}
+
 async function renderWithHeadless(
   options: OfflineRendererOptions,
   headless: HeadlessMode
 ): Promise<FrameRenderResult[]> {
   await mkdirp(options.outDir);
   const isRemoteEntry = /^https?:\/\//i.test(options.entry);
-  const staticServer = isRemoteEntry ? null : await createStaticEntryServer(options.entry);
+  const staticServer = isRemoteEntry
+    ? null
+    : await withStep("Starting static entry server", () => createStaticEntryServer(options.entry));
   const entryUrl = staticServer
     ? staticServer.url
     : options.entry.startsWith("http")
@@ -152,31 +266,6 @@ async function renderWithHeadless(
 
   const launchAttempts = resolveLaunchAttempts(headless);
   let lastError: unknown = null;
-
-  try {
-    for (const attempt of launchAttempts) {
-      try {
-        return await renderWithLaunchProfile(options, headless, entryUrl, attempt);
-      } catch (error) {
-        lastError = error;
-        if (!isRendererAutoDetectError(error)) {
-          throw error;
-        }
-        if (attempt === launchAttempts[launchAttempts.length - 1]) {
-          throw error;
-        }
-        console.warn(
-          `[vis-export] Renderer auto-detection failed using ${attempt.description}. Retrying with next launch profile.`
-        );
-      }
-    }
-  } finally {
-    await staticServer?.close();
-  }
-
-  if (lastError) {
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
-  }
 
   throw new Error("Offline render failed to initialize a renderer");
 }
@@ -226,16 +315,125 @@ async function renderWithLaunchProfile(
 ): Promise<FrameRenderResult[]> {
   let browser: Browser | null = null;
   try {
-    browser = await puppeteer.launch({
-      headless,
-      protocolTimeout: 120_000,
-      args: attempt.args,
-    });
+    for (const attempt of launchAttempts) {
+      try {
+        return await renderWithLaunchProfile(options, headless, entryUrl, attempt);
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        const annotated = annotateLaunchAttemptFailure(failure, attempt, headless);
+        lastError = annotated;
+        if (!isRendererAutoDetectError(annotated)) {
+          throw annotated;
+        }
+        if (attempt === launchAttempts[launchAttempts.length - 1]) {
+          throw annotated;
+        }
+        console.warn(
+          `[vis-export] Renderer auto-detection failed using ${attempt.description}. Retrying with next launch profile.`,
+          annotated
+        );
+      }
+    }
+  } finally {
+    if (staticServer) {
+      try {
+        await withStep("Stopping static entry server", () => staticServer.close());
+      } catch (error) {
+        console.warn("[vis-export] Failed to stop static entry server cleanly.", error);
+      }
+    }
+  }
 
-    const page = await browser.newPage();
-    await page.setViewport({ width: options.width, height: options.height, deviceScaleFactor: 1 });
-    page.setDefaultTimeout(120_000);
-    page.setDefaultNavigationTimeout(120_000);
+  if (lastError) {
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  throw new Error("Offline render failed to initialize a renderer");
+}
+
+interface LaunchAttempt {
+  description: string;
+  args: string[];
+  ignoreDefaultArgs?: string[];
+}
+
+function resolveLaunchAttempts(headless: HeadlessMode): LaunchAttempt[] {
+  const baseArgs = [
+    ...(headless === "shell" || headless === false ? [] : ["--headless=new"]),
+    "--autoplay-policy=no-user-gesture-required",
+    "--disable-dev-shm-usage",
+  ];
+
+  const gpuArgs = [
+    "--enable-gpu",
+    "--ignore-gpu-blocklist",
+    "--enable-webgl",
+    "--enable-webgl2",
+    "--enable-accelerated-2d-canvas",
+  ];
+
+  const gpuDefaultArgBlocklist = ["--disable-gpu", "--disable-software-rasterizer"];
+
+  return [
+    {
+      description: "ANGLE OpenGL",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=angle", "--use-angle=opengl"],
+      ignoreDefaultArgs: gpuDefaultArgBlocklist,
+    },
+    {
+      description: "SwiftShader",
+      args: [...baseArgs, ...gpuArgs, "--use-gl=swiftshader", "--use-angle=swiftshader"],
+      ignoreDefaultArgs: gpuDefaultArgBlocklist,
+    },
+    {
+      description: "Software fallback",
+      args: [...baseArgs, "--disable-gpu", "--use-gl=swiftshader"],
+    },
+  ];
+}
+
+function annotateLaunchAttemptFailure(error: Error, attempt: LaunchAttempt, headless: HeadlessMode): Error {
+  const context = `Chromium launch profile "${attempt.description}" (headless=${describeHeadless(headless)})`;
+  if (!error.message.includes(context)) {
+    error.message = `${context}: ${error.message}`;
+  }
+  return error;
+}
+
+function isRendererAutoDetectError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return /Unable to auto-detect a suitable renderer/i.test(error.message);
+}
+
+async function renderWithLaunchProfile(
+  options: OfflineRendererOptions,
+  headless: HeadlessMode,
+  entryUrl: string,
+  attempt: LaunchAttempt
+): Promise<FrameRenderResult[]> {
+  let browser: Browser | null = null;
+  const protocolTimeout = resolveProtocolTimeout();
+  try {
+    browser = await withStep(`Launching Chromium (${attempt.description})`, () =>
+      puppeteer.launch({
+        headless,
+        protocolTimeout,
+        args: attempt.args,
+        ignoreDefaultArgs: attempt.ignoreDefaultArgs,
+      })
+    );
+
+    const page = await withStep("Opening new page", () => browser!.newPage());
+    await withStep(
+      `Configuring page viewport (${options.width}x${options.height}) and timeouts (${protocolTimeout}ms)`,
+      async () => {
+        await page.setViewport({ width: options.width, height: options.height, deviceScaleFactor: 1 });
+        page.setDefaultTimeout(protocolTimeout);
+        page.setDefaultNavigationTimeout(protocolTimeout);
+      }
+    );
 
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
@@ -264,41 +462,58 @@ async function renderWithLaunchProfile(
       console.warn(formatted);
     });
 
-    await page.goto(entryUrl, { waitUntil: "networkidle0" });
-    try {
-      await page.waitForFunction(
-        () => {
-          const bridge = window as unknown as {
-            __vis_ready?: boolean;
-            __vis_renderFrame?: unknown;
-          };
-          return bridge.__vis_ready || typeof bridge.__vis_renderFrame === "function";
-        },
-        { timeout: 120_000 }
-      );
-    } catch (error) {
-      if (consoleErrors.length > 0 || pageErrors.length > 0) {
-        const diagnostics = [...pageErrors, ...consoleErrors].join("\n");
-        throw new Error(`Failed to detect offline render readiness. Browser console reported:\n${diagnostics}`);
+    await withStep(`Navigating to ${entryUrl}`, () => page.goto(entryUrl, { waitUntil: "networkidle0" }));
+    await withStep("Waiting for offline renderer readiness", async () => {
+      try {
+        await page.waitForFunction(
+          () => {
+            const bridge = window as unknown as {
+              __vis_ready?: boolean;
+              __vis_renderFrame?: unknown;
+            };
+            return bridge.__vis_ready || typeof bridge.__vis_renderFrame === "function";
+          },
+          { timeout: protocolTimeout }
+        );
+      } catch (error) {
+        if (consoleErrors.length > 0 || pageErrors.length > 0) {
+          const diagnostics = [...pageErrors, ...consoleErrors].join("\n");
+          throw new Error(`Failed to detect offline render readiness. Browser console reported:\n${diagnostics}`);
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
 
-    const results: FrameRenderResult[] = [];
-    for (let frame = 0; frame < options.totalFrames; frame++) {
-      const time = (frame / options.fps) * 1000;
-      await page.evaluate((ms: number) => {
-        return (window as unknown as { __vis_renderFrame?: (ms: number) => Promise<void> }).__vis_renderFrame?.(ms);
-      }, time);
-      const outPath = join(options.outDir, `frame-${frame.toString().padStart(5, "0")}.png`);
-      await page.screenshot({ path: outPath });
-      results.push({ frame, path: outPath });
-    }
+    const results = await withStep(`Rendering ${options.totalFrames} frame(s)`, async () => {
+      const frames: FrameRenderResult[] = [];
+      for (let frame = 0; frame < options.totalFrames; frame++) {
+        if (
+          frame === 0 ||
+          frame === options.totalFrames - 1 ||
+          options.totalFrames <= 10 ||
+          frame % Math.max(1, Math.floor(options.totalFrames / 10)) === 0
+        ) {
+          console.log(`[vis-export] Rendering frame ${frame + 1}/${options.totalFrames}`);
+        }
+        const time = (frame / options.fps) * 1000;
+        await page.evaluate((ms: number) => {
+          return (window as unknown as { __vis_renderFrame?: (ms: number) => Promise<void> }).__vis_renderFrame?.(ms);
+        }, time);
+        const outPath = join(options.outDir, `frame-${frame.toString().padStart(5, "0")}.png`);
+        await page.screenshot({ path: outPath });
+        frames.push({ frame, path: outPath });
+      }
+      return frames;
+    });
 
     return results;
   } finally {
     if (browser) {
-      await browser.close();
+      try {
+        await withStep("Closing Chromium", () => browser!.close());
+      } catch (error) {
+        console.warn("[vis-export] Failed to close Chromium cleanly.", error);
+      }
     }
   }
 }
@@ -437,52 +652,82 @@ async function createStaticEntryServer(entryPath: string): Promise<StaticServerH
       return;
     }
 
-    const candidatePath = sanitized.length === 0 ? resolvedEntry : resolve(rootDirResolved, sanitized);
-    const normalizedCandidate = resolve(candidatePath);
-    const isWithinRoot =
-      normalizedCandidate === rootDirResolved || normalizedCandidate.startsWith(rootDirWithSep) || normalizedCandidate === resolvedEntry;
-    if (!isWithinRoot) {
-      response.statusCode = 403;
-      response.end("Forbidden");
-      return;
-    }
-
     void (async () => {
-      try {
-        let filePath = sanitized.length === 0 ? resolvedEntry : normalizedCandidate;
-        let fileStat = await stat(filePath);
-        if (fileStat.isDirectory()) {
-          filePath = join(filePath, "index.html");
-          fileStat = await stat(filePath);
+      const visited = new Set<string>();
+      let attemptSanitized = sanitized;
+
+      while (true) {
+        if (visited.has(attemptSanitized)) {
+          break;
         }
+        visited.add(attemptSanitized);
 
-        const contentType = getContentType(filePath);
-        response.statusCode = 200;
-        response.setHeader("Content-Type", contentType);
-        response.setHeader("Content-Length", fileStat.size);
-
-        if (method === "HEAD") {
-          response.end();
+        const candidatePath =
+          attemptSanitized.length === 0 ? resolvedEntry : resolve(rootDirResolved, attemptSanitized);
+        const normalizedCandidate = resolve(candidatePath);
+        const isWithinRoot =
+          normalizedCandidate === rootDirResolved ||
+          normalizedCandidate.startsWith(rootDirWithSep) ||
+          normalizedCandidate === resolvedEntry;
+        if (!isWithinRoot) {
+          response.statusCode = 403;
+          response.end("Forbidden");
           return;
         }
 
-        const stream = createReadStream(filePath);
-        stream.on("error", (error) => {
-          console.error(`[vis-export][static-server] Failed to stream ${filePath}`, error);
-          if (!response.headersSent) {
-            response.statusCode = 500;
-            response.end("Failed to read file");
-          } else {
-            response.destroy(error as Error);
+        try {
+          let filePath = attemptSanitized.length === 0 ? resolvedEntry : normalizedCandidate;
+          let fileStat = await stat(filePath);
+          if (fileStat.isDirectory()) {
+            filePath = join(filePath, "index.html");
+            fileStat = await stat(filePath);
           }
-        });
-        stream.pipe(response);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(`[vis-export][static-server] ${sanitized || "/"} → ${message}`);
-        if (!response.headersSent) {
-          response.statusCode = sanitized.length === 0 ? 500 : 404;
+
+          const contentType = getContentType(filePath);
+          response.statusCode = 200;
+          response.setHeader("Content-Type", contentType);
+          response.setHeader("Content-Length", fileStat.size);
+
+          if (method === "HEAD") {
+            response.end();
+            return;
+          }
+
+          const stream = createReadStream(filePath);
+          stream.on("error", (streamError) => {
+            console.error(`[vis-export][static-server] Failed to stream ${filePath}`, streamError);
+            if (!response.headersSent) {
+              response.statusCode = 500;
+              response.end("Failed to read file");
+            } else {
+              response.destroy(streamError as Error);
+            }
+          });
+          stream.pipe(response);
+          return;
+        } catch (error) {
+          const err = error as NodeJS.ErrnoException;
+          const message = err instanceof Error ? err.message : String(error);
+          if (err?.code === "ENOENT") {
+            const stripped = stripLineAndColumnSuffix(attemptSanitized);
+            if (stripped !== attemptSanitized) {
+              attemptSanitized = stripped;
+              continue;
+            }
+          }
+          console.warn(`[vis-export][static-server] ${attemptSanitized || "/"} → ${message}`);
+          if (!response.headersSent) {
+            response.statusCode = attemptSanitized.length === 0 ? 500 : 404;
+            response.end("Not Found");
+          } else {
+            response.end();
+          }
+          return;
         }
+      }
+
+      if (!response.headersSent) {
+        response.statusCode = sanitized.length === 0 ? 500 : 404;
         response.end("Not Found");
       }
     })();
@@ -531,6 +776,23 @@ function sanitizePathname(pathname: string): string | null {
     safeSegments.push(segment);
   }
   return safeSegments.join("/");
+}
+
+function stripLineAndColumnSuffix(pathname: string): string {
+  if (!pathname) {
+    return pathname;
+  }
+  const segments = pathname.split("/");
+  if (segments.length === 0) {
+    return pathname;
+  }
+  const last = segments[segments.length - 1];
+  const match = /^(.*?)(:\d+){1,2}$/.exec(last);
+  if (match && match[1]) {
+    segments[segments.length - 1] = match[1];
+    return segments.join("/");
+  }
+  return pathname;
 }
 
 const MIME_TYPES: Record<string, string> = {
